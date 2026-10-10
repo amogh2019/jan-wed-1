@@ -4,7 +4,7 @@
  * (The OneSignal REST API key lives ONLY in Apps Script "Script Properties".)
  */
 window.APP_CONFIG = Object.freeze({
-  EVENT_NAME: 'Our 3-Day Celebration',
+  EVENT_NAME: 'Kaus-Anch : Our 3-Day Celebration',
   EVENT_TAGLINE: 'Schedule, live updates & pick-ups',
   // Optional: shown on the invitation screen and in the header ('' to hide)
   EVENT_DATES: '23 - 25 January 2027',                       // e.g. '12 – 14 January 2027'
