@@ -313,6 +313,22 @@ var ACTIONS_ = {
     return { event: event, push: push, itinerary: refreshItineraryCache_() };
   },
 
+  broadcastNotification: function (payload, user, req) {
+    var title = requireString_(payload.title, 'title');
+    var body = requireString_(payload.body, 'body', 500);
+    if (!Array.isArray(payload.groups)) throw new AppError('BAD_REQUEST', '"groups" must be an array.');
+    var groups = resolveGroups_(payload.groups);
+    var message = { title: title, body: body };
+    var push = sendPush_(message, groups, '');
+
+    logNotification_(message, { id: '', groups: groups }, user.email, push);
+    var result = push.ok ? 'push sent' : 'push FAILED: ' + push.error;
+    writeAudit_(user.email, AUDIT_CATEGORY.EVENT,
+      'Broadcast "' + title + '" to ' + audienceLabel_(groups) + ' — ' + result, req.timestamp);
+
+    return { push: push, notifications: notificationsFor_(user, true) };
+  },
+
   updatePickup: function (payload, user, req) {
     return setTravelStatus_(payload, user, req, 'PickupStatus', PICKUP_STATUSES);
   },
@@ -748,12 +764,17 @@ function requireRole_(value) {
  * The result always carries `message` ({title, body}) so it can be logged in Notifications.
  */
 function sendLivePush_(event) {
-  var groups = event.groups || [];
   var message = {
     title: '\uD83E\uDE94 Live now: ' + event.title,
     body: [event.title, event.location ? '@ ' + event.location : '', event.time ? '(' + event.time + ')' : '']
       .filter(String).join(' ') + ' \u2014 please gather at the venue!',
   };
+  return sendPush_(message, event.groups || [], 'event-live');
+}
+
+/** Sends an already-composed message to the opaque IDs matching its audience. */
+function sendPush_(message, groups, topic) {
+  groups = groups || [];
   var fail = function (error) { return { attempted: true, ok: false, error: error, message: message }; };
 
   var appId = getProp_('ONESIGNAL_APP_ID', false);
@@ -765,8 +786,8 @@ function sendLivePush_(event) {
     target_channel: 'push',
     headings: { en: message.title },
     contents: { en: message.body },
-    web_push_topic: 'event-live',
   };
+  if (topic) body.web_push_topic = topic;
   var ids = groupPushIds_(groups);
   if (!ids.length) return fail(groups.length ? 'No members are in group ' + groups.join(', ') + ' yet.' : 'There are no current members to notify.');
   if (ids.length > MAX_PUSH_ALIASES) {
@@ -1322,13 +1343,13 @@ function getProp_(key, required) {
   return value || '';
 }
 
-function requireString_(value, field) {
+function requireString_(value, field, maxLength) {
   if (value != null && typeof value !== 'string' && typeof value !== 'number') {
     throw new AppError('BAD_REQUEST', '"' + field + '" must be text.');
   }
   var s = value == null ? '' : String(value).trim();
   if (!s) throw new AppError('BAD_REQUEST', '"' + field + '" is required.');
-  if (s.length > MAX_FIELD_LEN) throw new AppError('BAD_REQUEST', '"' + field + '" is too long.');
+  if (s.length > (maxLength || MAX_FIELD_LEN)) throw new AppError('BAD_REQUEST', '"' + field + '" is too long.');
   return s;
 }
 

@@ -52,7 +52,7 @@ window.OneSignalDeferred = { push(callback) {
 function makeBackend() {
   const members = [
     { email: 'admin@gmail.com', role: 'Admin', addedBy: 'setup()', addedDate: '', tourStatus: 'Completed', groups: [] },
-    { email: 'viewer@gmail.com', role: 'Viewer', addedBy: 'admin@gmail.com', addedDate: '', tourStatus: 'Pending', groups: [] },
+    { email: 'viewer@gmail.com', role: 'Viewer', addedBy: 'admin@gmail.com', addedDate: '', tourStatus: 'Completed', groups: [] },
   ];
   const itinerary = [{ id: '1', day: 'Fri', time: '10:00', title: 'Welcome', location: 'Hall', status: 'Upcoming', groups: [] }];
   const groupCatalog = [];
@@ -64,7 +64,8 @@ function makeBackend() {
   const clearedNotifications = new Map();
   const email = (tok) => JSON.parse(Buffer.from(tok.split('.')[1], 'base64url').toString()).email;
   return {
-    audit, members, itinerary, logistics, notifications, groupCatalog, calls: 0, tourCalls: [], expireNext: false, failNextAction: null,
+    audit, members, itinerary, logistics, notifications, groupCatalog, calls: 0, tourCalls: [], broadcastRequests: [],
+    expireNext: false, failNextAction: null, failBroadcastPush: false,
     ignoreAudienceFilters: false,
     exposeNoticeMetadataToGuests: false,
     handle(body) {
@@ -151,6 +152,15 @@ function makeBackend() {
           message: `${event.title} is live`, eventId: event.id, groups: event.groups || [], sentBy: me, pushStatus: 'Sent',
         });
         return { ok: true, data: { event, push: { attempted: p.status === 'Live' && p.notify !== false, ok: true }, itinerary } };
+      }
+      if (body.action === 'broadcastNotification') {
+        this.broadcastRequests.push({ email: me, timestamp: body.timestamp, ...p });
+        const push = { attempted: true, ok: !this.failBroadcastPush, error: this.failBroadcastPush ? 'Simulated OneSignal failure.' : undefined };
+        notifications.unshift({
+          id: `n${notifications.length + 1}`, at: new Date().toISOString(), title: p.title, message: p.body,
+          eventId: '', groups: parseGroups(p.groups), sentBy: me, pushStatus: push.ok ? 'Sent' : `Failed: ${push.error}`,
+        });
+        return { ok: true, data: { push, notifications: [...notifications] } };
       }
       if (body.action === 'deleteEvent') {
         const i = itinerary.findIndex((e) => e.id === p.eventId && e.title === p.title);
@@ -252,6 +262,7 @@ async function assertTourStep(page, id, tab, target = null) {
       ['schedule-days', 'schedule'],
       ['notifications', 'notifications', '#view [data-tour="notifications-overview"]'],
       ['event-control', 'control', '#view [data-tour="event-control"]'],
+      ['broadcast', 'broadcast', '#view [data-tour="broadcast-overview"]'],
       ['pick-drop', 'pickups', '#view [data-tour="pick-drop-overview"]'],
       ['members', 'members', '#view [data-tour="members-overview"]'],
       ['notify', 'schedule'],
@@ -262,6 +273,7 @@ async function assertTourStep(page, id, tab, target = null) {
       await assertTourStep(adminTourPage, id, tab, target);
       if (id === 'notifications') assert(await adminTourPage.isVisible('text=No announcements yet'), 'empty notifications screen remains explained');
       if (id === 'event-control') assert(await adminTourPage.isVisible('text=No ceremonies yet'), 'empty Event Control screen remains explained');
+      if (id === 'broadcast') assert(await adminTourPage.isVisible('text=No groups selected means everyone'), 'Broadcast tour explains its default audience');
       if (id === 'pick-drop') assert(await adminTourPage.isVisible('text=No travel plans yet'), 'empty Pick & Drop screen remains explained');
       if (id === 'members') assert(await adminTourPage.isVisible('text=No group labels yet'), 'empty group catalog remains explained');
       if (i < adminTourSteps.length - 1) await adminTourPage.click('[data-tour="next"]');
@@ -285,6 +297,115 @@ async function assertTourStep(page, id, tab, target = null) {
     assert(adminTourBackend.tourCalls.length === 1, 'replay uses the current Admin path without another completion write');
     await adminTourPage.close();
 
+    console.log('Admin standalone Broadcast targeting and WhatsApp handoff');
+    const broadcastBackend = makeBackend();
+    broadcastBackend.notifications.splice(0);
+    broadcastBackend.groupCatalog.push(
+      { label: 'Group A', status: 'Active' },
+      { label: 'Group B', status: 'Active' },
+      { label: 'Outside', status: 'Active' },
+    );
+    broadcastBackend.members.find((m) => m.email === 'viewer@gmail.com').groups = ['Group A'];
+    broadcastBackend.members.push(
+      { email: 'beta@gmail.com', role: 'Atithi', addedBy: 'admin@gmail.com', addedDate: '', tourStatus: 'Completed', groups: ['Group B'] },
+      { email: 'outside@gmail.com', role: 'Atithi', addedBy: 'admin@gmail.com', addedDate: '', tourStatus: 'Completed', groups: ['Outside'] },
+    );
+    const broadcastPage = await newPage(browser, broadcastBackend);
+    await broadcastPage.waitForSelector('#fake-gsi');
+    await signIn(broadcastPage, 'admin@gmail.com');
+    await enter(broadcastPage);
+    await broadcastPage.waitForSelector('[data-tab="broadcast"]:not(.hidden)');
+    await broadcastPage.click('[data-tab="broadcast"]');
+    await broadcastPage.waitForSelector('#broadcast-title');
+    assert(await visible(broadcastPage, '[data-tab="broadcast"]'), 'Admin can open the Broadcast tab');
+    broadcastBackend.delayMs = 500;
+    await broadcastPage.fill('#broadcast-title', 'Audience update');
+    await broadcastPage.fill('#broadcast-body', 'Please use the east entrance.');
+    await broadcastPage.check('input[data-action="broadcast-groups"][value="Group A"]');
+    await broadcastPage.check('input[data-action="broadcast-groups"][value="Group B"]');
+    await broadcastPage.click('[data-action="broadcast-send"]');
+    await broadcastPage.waitForSelector('[data-action="broadcast-send"] .spinner');
+    assert(await broadcastPage.isDisabled('[data-action="broadcast-send"]'), 'Broadcast button disables while the request is pending');
+    await broadcastPage.waitForSelector('#toast-root >> text=Broadcast sent');
+    broadcastBackend.delayMs = 0;
+    assert(broadcastBackend.broadcastRequests[0].email === 'admin@gmail.com' &&
+      broadcastBackend.broadcastRequests[0].title === 'Audience update' &&
+      broadcastBackend.broadcastRequests[0].body === 'Please use the east entrance.' &&
+      broadcastBackend.broadcastRequests[0].groups.join(',') === 'Group A,Group B',
+    'broadcast sends the exact composed message and selected groups');
+
+    for (const [email, expected] of [
+      ['viewer@gmail.com', true],
+      ['beta@gmail.com', true],
+      ['outside@gmail.com', false],
+    ]) {
+      const memberPage = await newPage(browser, broadcastBackend);
+      await memberPage.waitForSelector('#fake-gsi');
+      await signIn(memberPage, email);
+      await enter(memberPage);
+      await memberPage.click('[data-tab="notifications"]');
+      if (expected) {
+        await memberPage.waitForSelector('#view >> text=Audience update');
+        assert((await memberPage.textContent('#view')).includes('Please use the east entrance.'),
+          `${email} receives the announcement for a matching group`);
+      } else {
+        await memberPage.waitForSelector('#view >> text=No announcements yet');
+        assert(!(await memberPage.textContent('#view')).includes('Audience update'),
+          'members outside selected groups do not see the announcement');
+      }
+      await memberPage.close();
+    }
+
+    await broadcastPage.fill('#broadcast-title', 'All-member update');
+    await broadcastPage.fill('#broadcast-body', 'Everyone is welcome.');
+    broadcastBackend.delayMs = 250;
+    await broadcastPage.click('[data-action="broadcast-send"]');
+    await broadcastPage.waitForSelector('[data-action="broadcast-send"][disabled]');
+    await broadcastPage.waitForSelector('[data-action="broadcast-send"]:not([disabled])');
+    await broadcastPage.waitForSelector('#toast-root >> text=Broadcast sent');
+    broadcastBackend.delayMs = 0;
+    assert(broadcastBackend.broadcastRequests[1].groups.length === 0, 'no group selection sends to everyone');
+
+    broadcastBackend.failBroadcastPush = true;
+    await broadcastPage.fill('#broadcast-title', 'Bring umbrellas');
+    await broadcastPage.fill('#broadcast-body', 'Meet at the covered entrance.');
+    broadcastBackend.delayMs = 500;
+    const whatsappPopupPromise = broadcastPage.waitForEvent('popup');
+    await broadcastPage.click('[data-action="broadcast-whatsapp"]');
+    const whatsappPopup = await whatsappPopupPromise;
+    assert(whatsappPopup.url() === 'about:blank',
+      'WhatsApp tab opens synchronously before the broadcast request completes');
+    await broadcastPage.waitForSelector('#toast-root >> text=push failed');
+    await whatsappPopup.waitForURL(/api\.whatsapp\.com\/send/, { waitUntil: 'commit' });
+    const whatsappText = new URL(whatsappPopup.url()).searchParams.get('text');
+    assert(whatsappText === '*Bring umbrellas*\n\nMeet at the covered entrance.' &&
+      !whatsappText.includes('Group A') && !whatsappText.includes('Group B'),
+    'WhatsApp receives the composed title and body without audience labels even when push delivery fails');
+
+    const broadcastsBeforeRejectedRequest = broadcastBackend.broadcastRequests.length;
+    broadcastBackend.failNextAction = 'broadcastNotification';
+    broadcastBackend.delayMs = 250;
+    await broadcastPage.fill('#broadcast-title', 'Rejected message');
+    await broadcastPage.fill('#broadcast-body', 'This must not be sent.');
+    const rejectedPopupPromise = broadcastPage.waitForEvent('popup');
+    await broadcastPage.click('[data-action="broadcast-whatsapp"]');
+    const rejectedPopup = await rejectedPopupPromise;
+    const rejectedClosePromise = rejectedPopup.waitForEvent('close');
+    await broadcastPage.waitForSelector('#toast-root >> text=Simulated request failure.');
+    await rejectedClosePromise;
+    broadcastBackend.delayMs = 0;
+    assert(rejectedPopup.isClosed(), 'rejected broadcast closes its temporary WhatsApp tab');
+    assert(broadcastBackend.broadcastRequests.length === broadcastsBeforeRejectedRequest,
+      'rejected request is not recorded as an accepted broadcast');
+    await broadcastPage.close();
+
+    const atithiBroadcastPage = await newPage(browser, broadcastBackend);
+    await atithiBroadcastPage.waitForSelector('#fake-gsi');
+    await signIn(atithiBroadcastPage, 'viewer@gmail.com');
+    await enter(atithiBroadcastPage);
+    assert(!(await visible(atithiBroadcastPage, '[data-tab="broadcast"]')), 'Atithi cannot see the Broadcast tab');
+    await atithiBroadcastPage.close();
+
     console.log('Tour uses stable fallbacks when Atithi screens are empty');
     const sparseTourBackend = makeBackend();
     sparseTourBackend.members.find((m) => m.email === 'viewer@gmail.com').tourStatus = 'Pending';
@@ -296,6 +417,7 @@ async function assertTourStep(page, id, tab, target = null) {
     await signIn(sparseTourPage, 'viewer@gmail.com');
     await enter(sparseTourPage);
     await sparseTourPage.waitForSelector('#tour-root');
+    assert(!(await visible(sparseTourPage, '[data-tab="broadcast"]')), 'Broadcast is not available to Atithis');
     await sparseTourPage.click('[data-tour="next"]');
     await assertTourStep(sparseTourPage, 'schedule', 'schedule', '#view [data-tour="schedule-overview"]');
     await sparseTourPage.click('[data-tour="next"]');
@@ -367,6 +489,7 @@ async function assertTourStep(page, id, tab, target = null) {
     assert(await page.evaluate(() => !localStorage.getItem('evt.credential')), 'credential cleared on deny');
 
     console.log('Viewer');
+    backend.members.find((m) => m.email === 'viewer@gmail.com').tourStatus = 'Pending';
     await signIn(page, 'viewer@gmail.com');
     await page.waitForSelector('#welcome-splash');
     assert(await page.isVisible('text=श्री गणेशाय नमः'), 'welcome splash opens with Ganesh Vandana');
@@ -666,6 +789,7 @@ async function assertTourStep(page, id, tab, target = null) {
 
     console.log('Guests see only their audience plus everyone');
     const audienceBackend = makeBackend();
+    audienceBackend.members.find((m) => m.email === 'viewer@gmail.com').tourStatus = 'Pending';
     audienceBackend.members[1].groups = ['Group A'];
     audienceBackend.itinerary.push(
       { id: '2', day: 'Fri', time: '11:00', title: 'Group A event', location: 'Hall A', status: 'Upcoming', groups: ['Group A'] },
@@ -713,6 +837,7 @@ async function assertTourStep(page, id, tab, target = null) {
 
     console.log('Tour completion stays busy and can recover from an error');
     const tourRetryBackend = makeBackend();
+    tourRetryBackend.members.find((m) => m.email === 'viewer@gmail.com').tourStatus = 'Pending';
     const tourRetryPage = await newPage(browser, tourRetryBackend);
     await tourRetryPage.waitForSelector('#fake-gsi');
     await signIn(tourRetryPage, 'viewer@gmail.com');

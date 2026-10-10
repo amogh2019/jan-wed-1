@@ -13,7 +13,7 @@ window.APP_CONFIG = Object.freeze({
   // Optional: shown on the invitation screen and in the header ('' to hide)
   EVENT_DATES: '23 - 25 January 2027',                       // e.g. '12 – 14 January 2027'
   EVENT_BLESSING: '॥ श्री गणेशाय नमः ॥',  // auspicious line atop the invitation
-  EVENT_HOSTS: 'Kaus - Anch',                       // e.g. 'The Sharma & Verma families' — signs the welcome blessing
+  EVENT_HOSTS: 'Families of Kaus & Anch',                       // e.g. 'The Sharma & Verma families' — signs the welcome blessing
 
   // Apps Script Web App URL (Deploy → New deployment → Web app → copy URL ending in /exec)
   APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbyQRW2wdZ3Mr57AGcO78x7e36bNvixdH3hP3M2dzbBRUzrqyn0QODns9w3CcJUHiIZl_g/exec',

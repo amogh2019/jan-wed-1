@@ -125,6 +125,7 @@
       /** @type {Guest[]} */
       logistics: [],
       members: [],
+      broadcastDraft: { title: '', body: '', groups: [] },
       myTravel: [],        // the signed-in guest's own pick-up / drop rows
       notifications: [],
       groups: [],
@@ -393,6 +394,7 @@
       const memberGroups = Array.isArray(data.groups) ? data.groups : [];
       const itinerary = Array.isArray(data.itinerary) ? data.itinerary : [];
       const notifications = Array.isArray(data.notifications) ? data.notifications : [];
+      const preserveBroadcastDraft = isAdmin && Store.state.user?.email === user.email;
       const visibleItinerary = isAdmin ? itinerary : itinerary.filter((event) => matchesAudience(event.groups, memberGroups));
       const visibleNotifications = isAdmin
         ? notifications
@@ -418,6 +420,7 @@
         groups: memberGroups,
         knownGroups: Array.isArray(data.knownGroups) ? data.knownGroups : [],
         groupCatalog: Array.isArray(data.groupCatalog) ? data.groupCatalog : [],
+        broadcastDraft: preserveBroadcastDraft ? Store.state.broadcastDraft : { title: '', body: '', groups: [] },
         pushId: typeof data.pushId === 'string' ? data.pushId : '',
         eventGroupsDrafts: {},
         memberGroupsDrafts: {},
@@ -450,7 +453,7 @@
       storage.remove(STORAGE.CREDENTIAL);
       storage.remove(STORAGE.LAST_USER);
       storage.remove(STORAGE.DATA_CACHE);
-      Store.set({ user: null, role: null, isAdmin: false, loading: false, itinerary: [], logistics: [], members: [], myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, familyContact: null, tab: 'schedule', lastSynced: null, ...patch });
+      Store.set({ user: null, role: null, isAdmin: false, loading: false, itinerary: [], logistics: [], members: [], myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, broadcastDraft: { title: '', body: '', groups: [] }, familyContact: null, tab: 'schedule', lastSynced: null, ...patch });
     },
 
     deny(email) {
@@ -466,7 +469,7 @@
       void Push.logout();
       sessionStore.remove(STORAGE.CREDENTIAL);
       // Admin-only data must not linger on screen after the session ends.
-      Store.set({ authStatus: 'signed-out', user: null, isAdmin: false, role: null, logistics: [], members: [], myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, loading: false, tab: 'schedule' });
+      Store.set({ authStatus: 'signed-out', user: null, isAdmin: false, role: null, logistics: [], members: [], myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, broadcastDraft: { title: '', body: '', groups: [] }, loading: false, tab: 'schedule' });
       Modal.close();
       Tour.cancel();
       this.prompt();
@@ -955,6 +958,7 @@
       if (s.isAdmin) {
         steps.push(
           { id: 'event-control', tab: 'control', targets: ['#view [data-tour="event-control"]'], title: 'Event Control', body: 'Create ceremonies, choose their audience, then mark one Live to notify guests and prepare a WhatsApp broadcast.' },
+          { id: 'broadcast', tab: 'broadcast', targets: ['#view [data-tour="broadcast-overview"]'], title: 'Broadcast', body: 'Send a standalone note to everyone or selected groups, then optionally open the same title and message in WhatsApp.' },
           { id: 'pick-drop', tab: 'pickups', targets: ['#view [data-tour="pick-drop-overview"]'], title: 'Pick-up and drop-off', body: 'Add and edit travel plans, switch between arrivals and departures, and track each family’s progress.' },
           { id: 'members', tab: 'members', targets: ['#view [data-tour="members-overview"]'], title: 'Members & access', body: 'Invite Atithis, assign roles and group labels, and manage the available group labels.' },
         );
@@ -1444,6 +1448,30 @@
       </div>`;
   };
 
+  Views.broadcast = (s) => {
+    const draft = s.broadcastDraft || { title: '', body: '', groups: [] };
+    const busy = Store.isPending('broadcast:send');
+    return `
+      ${pageHeader('Host console', 'Broadcast', 'Send a note that is not tied to a ceremony.', 'broadcast-overview')}
+      <section class="card p-4 space-y-4">
+        <p class="text-sm text-ink-600">No groups selected means everyone. Select multiple groups to reach members in any selected group.</p>
+        ${field('Notification title', `<input id="broadcast-title" data-action="broadcast-title" type="text" maxlength="200" required value="${escapeHtml(draft.title)}" class="input" autocomplete="off" />`)}
+        ${field('Message', `<textarea id="broadcast-body" data-action="broadcast-body" maxlength="500" rows="5" required class="input">${escapeHtml(draft.body)}</textarea>`)}
+        <fieldset>
+          <legend class="block text-xs font-semibold text-ink-500">Audience groups (optional)</legend>
+          ${groupPicker(s.groupCatalog, draft.groups, 'broadcast-groups')}
+        </fieldset>
+        <div class="grid gap-2 sm:grid-cols-2">
+          <button type="button" data-action="broadcast-send" ${busy ? 'disabled' : ''} ${pendingAttrs('broadcast:send')} class="btn btn-primary min-h-[44px]">
+            ${spinnerOr('broadcast:send', '📣 Broadcast')}
+          </button>
+          <button type="button" data-action="broadcast-whatsapp" ${busy ? 'disabled' : ''} ${pendingAttrs('broadcast:send')} class="btn btn-whatsapp min-h-[44px]">
+            ${spinnerOr('broadcast:send', '📣 Broadcast + WhatsApp')}
+          </button>
+        </div>
+      </section>`;
+  };
+
   /** Pick-up (arrival) and drop (departure) are the same rows seen through two lenses. */
   const TRAVEL_MODES = {
     pickup: { statusKey: 'pickupStatus', done: 'Picked Up', timeKey: 'arrival', action: 'toggle-pickup', keyPrefix: 'pickup', doneLabel: '✓ Mark as Picked Up', welcomed: 'families welcomed', icon: '🚐' },
@@ -1660,7 +1688,7 @@
     return `
       ${pageHeader('Announcements from the hosts', 'Notifications', '', 'notifications-overview')}
       <section class="card p-4 mb-3">
-        <p class="text-sm text-ink-600">Announcements sent from Event Control Center appear here.</p>
+        <p class="text-sm text-ink-600">Event updates and host announcements appear here.</p>
         <button data-action="clear-notifications" ${!items.length || Store.isPending('notifications:clear') ? 'disabled' : ''} ${pendingAttrs('notifications:clear')} class="btn btn-ghost btn-sm mt-3 min-h-[44px]">
           ${spinnerOr('notifications:clear', 'Clear notifications')}
         </button>
@@ -1680,7 +1708,7 @@
   };
 
   /* --------------------------------------------------------------- Render */
-  const ADMIN_TABS = new Set(['control', 'pickups', 'members']);
+  const ADMIN_TABS = new Set(['control', 'pickups', 'members', 'broadcast']);
   const GUEST_TABS = new Set(['travel']); // admins see everyone's travel under Pick & Drop
   let lastGateKey = null;
 
@@ -1735,7 +1763,7 @@
 
   function renderNav(s, signedIn) {
     if ((!s.isAdmin && ADMIN_TABS.has(s.tab)) || (s.isAdmin && GUEST_TABS.has(s.tab))) s.tab = 'schedule';
-    $('#nav-grid').className = `max-w-2xl mx-auto grid ${s.isAdmin ? 'grid-cols-5' : 'grid-cols-3'}`;
+    $('#nav-grid').className = `max-w-2xl mx-auto grid ${s.isAdmin ? 'grid-cols-6' : 'grid-cols-3'}`;
     $('#bottom-nav').classList.toggle('hidden', !signedIn);
     $$('.nav-btn').forEach((btn) => {
       const shown = btn.classList.contains('admin-only') ? s.isAdmin : !btn.classList.contains('guest-only') || !s.isAdmin;
@@ -1921,6 +1949,39 @@
       } else {
         Toast.show(`"${data.event.title}" set to ${status}`, 'success');
       }
+    },
+
+    async sendBroadcast(shareToWhatsApp) {
+      const draft = Store.state.broadcastDraft;
+      const title = String(draft.title || '').trim();
+      const body = String(draft.body || '').trim();
+      const groups = Array.isArray(draft.groups) ? [...draft.groups] : [];
+      if (!title || !body) {
+        Toast.show('Enter a title and message before broadcasting.', 'error');
+        return;
+      }
+
+      const popup = shareToWhatsApp ? window.open('about:blank', '_blank') : null;
+      if (popup) popup.opener = null;
+      const data = await this.run('broadcast:send', () => Api.post('broadcastNotification', { title, body, groups }));
+      if (!data) {
+        popup?.close();
+        return;
+      }
+
+      Store.set({
+        notifications: data.notifications,
+        broadcastDraft: { title: '', body: '', groups: [] },
+      });
+      const push = data.push;
+      let status = push.ok
+        ? 'Broadcast sent.'
+        : `Broadcast recorded, but push failed: ${push.error || 'delivery status unavailable.'}`;
+      if (shareToWhatsApp) {
+        if (popup && !popup.closed) popup.location.href = WhatsApp.buildUrl(`*${title}*\n\n${body}`);
+        else status += ' The browser blocked the WhatsApp window.';
+      }
+      Toast.show(status, push.ok ? 'success' : 'error', 6000);
     },
 
     async updateEventGroups(eventId) {
@@ -2282,6 +2343,8 @@
       switch (action) {
         case 'refresh': void Data.refresh(); break;
         case 'open-broadcast': Actions.openBroadcast(id); break;
+        case 'broadcast-send': void Actions.sendBroadcast(false); break;
+        case 'broadcast-whatsapp': void Actions.sendBroadcast(true); break;
         case 'add-event': Actions.openAddEvent(); break;
         case 'delete-event': void Actions.deleteEvent(id); break;
         case 'save-event-groups': void Actions.updateEventGroups(id); break;
@@ -2315,6 +2378,10 @@
         Store.state.memberGroupsDrafts[groupCheckbox.dataset.email] = checkedGroups(groupCheckbox.closest('fieldset'));
         return;
       }
+      if (groupCheckbox?.dataset.action === 'broadcast-groups') {
+        Store.state.broadcastDraft.groups = checkedGroups(groupCheckbox.closest('fieldset'));
+        return;
+      }
       const roleSel = e.target.closest('select[data-action="set-role"]');
       if (roleSel) {
         const member = Store.state.members.find((m) => m.email === roleSel.dataset.email);
@@ -2336,6 +2403,8 @@
     view.addEventListener('input', (e) => {
       if (e.target.matches('[data-action="pickup-search"]')) Store.set({ pickupSearch: e.target.value });
       if (e.target.matches('[data-action="member-search"]')) Store.set({ memberSearch: e.target.value });
+      if (e.target.matches('[data-action="broadcast-title"]')) Store.state.broadcastDraft.title = e.target.value;
+      if (e.target.matches('[data-action="broadcast-body"]')) Store.state.broadcastDraft.body = e.target.value;
     });
 
     view.addEventListener('submit', (e) => {

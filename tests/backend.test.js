@@ -667,6 +667,118 @@ test('addMember: optional groups are stored with the new member', () => {
   assert.match(b.audit().at(-1)[3], /in groups Family/);
 });
 
+test('broadcastNotification: admin sends a standalone message to its selected group and records history and audit', () => {
+  const b = grouped();
+  registerGroups(b, ['Bride side', 'Family']);
+  b.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: ['Bride side'] });
+  b.call(ADMIN, 'updateMemberGroups', { email: GUEST_B, groups: ['Family'] });
+  const pushIdA = b.call(GUEST_A, 'session').data.pushId;
+  const pushCallsBefore = b.fetches.filter((f) => f.url.includes('onesignal')).length;
+
+  const out = b.call(ADMIN, 'broadcastNotification', {
+    title: 'Schedule update',
+    body: 'Meet at the east gate.',
+    groups: ['Bride side'],
+  });
+
+  assert.equal(out.ok, true);
+  assert.equal(out.data.push.ok, true);
+  const pushCalls = b.fetches.filter((f) => f.url.includes('onesignal'));
+  assert.equal(pushCalls.length, pushCallsBefore + 1);
+  const payload = JSON.parse(pushCalls.at(-1).opts.payload);
+  assert.equal(payload.headings.en, 'Schedule update');
+  assert.equal(payload.contents.en, 'Meet at the east gate.');
+  assert.equal(payload.web_push_topic, undefined, 'standalone broadcasts must not collapse into one browser notification');
+  assert.deepEqual(payload.include_aliases, { external_id: [pushIdA] });
+
+  const notificationRow = b.sheets.Notifications.data.at(-1);
+  assert.equal(notificationRow[1], 'Schedule update');
+  assert.equal(notificationRow[2], 'Meet at the east gate.');
+  assert.equal(notificationRow[3], '');
+  assert.equal(notificationRow[4], 'Bride side');
+  assert.equal(notificationRow[5], ADMIN);
+  assert.equal(notificationRow[6], 'Sent');
+  assert.equal(out.data.notifications[0].title, 'Schedule update');
+  const audit = b.audit().at(-1);
+  assert.equal(audit[1], ADMIN);
+  assert.equal(audit[2], 'Event');
+  assert.match(audit[3], /Broadcast .*Schedule update.*Bride side.*push sent/);
+});
+
+test('broadcastNotification: no groups reaches all members and multiple groups target the union once', () => {
+  const everyone = grouped();
+  const allIds = [ADMIN, GUEST_A, GUEST_B].map((email) => everyone.call(email, 'session').data.pushId);
+  const allResult = everyone.call(ADMIN, 'broadcastNotification', {
+    title: 'All guests',
+    body: 'A message for everyone.',
+    groups: [],
+  });
+  assert.equal(allResult.ok, true);
+  let payload = JSON.parse(everyone.fetches.find((f) => f.url.includes('onesignal')).opts.payload);
+  assert.deepEqual(payload.include_aliases.external_id, allIds);
+
+  const selected = grouped();
+  registerGroups(selected, ['Bride side', 'Family']);
+  selected.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: ['Bride side', 'Family'] });
+  selected.call(ADMIN, 'updateMemberGroups', { email: GUEST_B, groups: ['Family'] });
+  const expectedIds = [GUEST_A, GUEST_B].map((email) => selected.call(email, 'session').data.pushId);
+  const result = selected.call(ADMIN, 'broadcastNotification', {
+    title: 'Two groups',
+    body: 'Shared update.',
+    groups: ['Bride side', 'Family'],
+  });
+  assert.equal(result.ok, true);
+  payload = JSON.parse(selected.fetches.filter((f) => f.url.includes('onesignal')).at(-1).opts.payload);
+  assert.deepEqual(payload.include_aliases.external_id, expectedIds);
+  assert.equal(new Set(payload.include_aliases.external_id).size, expectedIds.length);
+});
+
+test('broadcastNotification: validates content and active groups before sending', () => {
+  const b = grouped();
+  registerGroups(b, ['Active group', 'Archived group']);
+  b.call(ADMIN, 'archiveGroup', { label: 'Archived group' });
+  const pushCount = () => b.fetches.filter((f) => f.url.includes('onesignal')).length;
+  const before = pushCount();
+  const invalidPayloads = [
+    { title: '', body: 'Body', groups: [] },
+    { title: 'Title', body: '  ', groups: [] },
+    { title: 'x'.repeat(201), body: 'Body', groups: [] },
+    { title: 'Title', body: 'x'.repeat(501), groups: [] },
+    { title: 'Title', body: 'Body', groups: ['Unknown'] },
+    { title: 'Title', body: 'Body', groups: ['Archived group'] },
+  ];
+  invalidPayloads.forEach((payload) => {
+    assert.equal(b.call(ADMIN, 'broadcastNotification', payload).code, 'BAD_REQUEST');
+  });
+  assert.equal(pushCount(), before, 'invalid broadcasts never reach OneSignal');
+  assert.equal(b.sheets.Notifications.data.length, 1, 'invalid broadcasts are not recorded');
+});
+
+test('broadcastNotification: only admins may send and failed push remains in history and audit', () => {
+  const b = createBackend({
+    members: [[ADMIN, 'Admin', 'seed', ''], [VIEWER, 'Atithi', ADMIN, '']],
+    props: { ONESIGNAL_REST_API_KEY: '' },
+  });
+  const payload = { title: 'Important', body: 'Please read this update.', groups: [] };
+  assert.equal(b.call(VIEWER, 'broadcastNotification', payload).code, 'FORBIDDEN');
+  assert.equal(b.sheets.Notifications, undefined, 'denied action does not record an announcement');
+  assert.match(b.audit().at(-1)[3], /Denied admin action "broadcastNotification"/);
+
+  const out = b.call(ADMIN, 'broadcastNotification', payload);
+  assert.equal(out.ok, true);
+  assert.equal(out.data.push.ok, false);
+  assert.match(out.data.push.error, /not configured/i);
+  const adminNotice = b.call(ADMIN, 'session').data.notifications[0];
+  const guestNotice = b.call(VIEWER, 'session').data.notifications[0];
+  assert.match(adminNotice.pushStatus, /^Failed:/);
+  assert.equal(guestNotice.pushStatus, undefined);
+  assert.equal(guestNotice.sentBy, undefined);
+  assert.equal(guestNotice.title, 'Important');
+  assert.equal(b.audit().at(-1)[1], ADMIN);
+  assert.equal(b.audit().at(-1)[2], 'Event');
+  assert.match(b.audit().at(-1)[3], /push FAILED/);
+});
+
 test('push: everyone-events go to current member IDs; labelled events only to that group\'s opaque IDs', () => {
   const b = grouped();
   registerGroups(b, ['Bride side']);
