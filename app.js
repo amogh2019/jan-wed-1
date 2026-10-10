@@ -478,6 +478,7 @@
         `*Event:* ${event.title}`,
         `*Location:* ${event.location || 'TBA'}`,
         `*Time:* ${[event.day, event.time].filter(Boolean).join(', ') || 'Now'}`,
+        ...(isMapsUrl(event.mapLink) ? [`*Map:* ${event.mapLink}`] : []),
         '',
         'Please gather at the venue!',
       ].join('\n');
@@ -689,9 +690,12 @@
     reset() { this.seenLive = null; },
   };
 
-  const mapsLink = (location) => (location
-    ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(String(location).slice(0, 200))}`
-    : '');
+  // Only Google Maps https links are ever used as hrefs (the backend applies the same allow-list).
+  const MAPS_URL_RE = /^https:\/\/(?:(?:www\.|maps\.)?google\.[a-z.]{2,6}\/maps|maps\.google\.[a-z.]{2,6}\/|maps\.app\.goo\.gl\/|goo\.gl\/maps\/)[^\s"'<>]*$/i;
+  const isMapsUrl = (url) => typeof url === 'string' && url.length <= 500 && MAPS_URL_RE.test(url);
+  const mapsSearch = (text) => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(String(text).slice(0, 200))}`;
+  /** The admin-pinned Google Maps link when there is one, otherwise a search for the location name. */
+  const mapsLink = (e) => (isMapsUrl(e.mapLink) ? e.mapLink : (e.location ? mapsSearch(e.location) : ''));
 
   /* -------------------------------------------------------------- Welcome */
   // Auspicious opening: Ganesh Vandana, then a personal welcome. Plays on every sign-in and every
@@ -966,7 +970,7 @@
   const clock = '<svg class="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>';
 
   const locationLine = (e, cls = 'text-ink-500') => (e.location ? `
-    <a href="${escapeHtml(mapsLink(e.location))}" target="_blank" rel="noopener noreferrer"
+    <a href="${escapeHtml(mapsLink(e))}" target="_blank" rel="noopener noreferrer"
       class="inline-flex items-center gap-1 text-sm ${cls} hover:underline underline-offset-2">${pin}${escapeHtml(e.location)}</a>` : '');
 
   const ScheduleParts = {
@@ -1004,7 +1008,7 @@
             <span class="inline-flex items-center gap-1">${clock}${escapeHtml(e.time || 'Now')}</span>
             ${e.location ? `<span class="inline-flex items-center gap-1">${pin}${escapeHtml(e.location)}</span>` : ''}
           </p>
-          ${e.location ? `<a href="${escapeHtml(mapsLink(e.location))}" target="_blank" rel="noopener noreferrer" class="relative btn btn-gold btn-sm mt-4">Take me there</a>` : ''}
+          ${e.location ? `<a href="${escapeHtml(mapsLink(e))}" target="_blank" rel="noopener noreferrer" class="relative btn btn-gold btn-sm mt-4">Take me there</a>` : ''}
         </section>`).join('');
     },
 
@@ -1532,6 +1536,22 @@
     return `${h % 12 || 12}:${m[2]} ${h < 12 ? 'AM' : 'PM'}`;
   };
 
+  /** "2027-01-23" (from <input type="date">) → "Sat, Jan 23", the same format the backend gives sheet dates. */
+  const toDayLabel = (ymd) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd || '');
+    if (!m) return '';
+    return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+      .toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+  };
+
+  /** Opens the native picker on tap/click too (not only the small calendar icon), where supported. */
+  const openPickerOnTap = (input) => {
+    const show = () => { try { input.showPicker?.(); } catch { /* not allowed without a gesture / unsupported */ } };
+    input.addEventListener('click', show);
+  };
+
+  const TRAVEL_MODE_OPTIONS = ['Plane', 'Train', 'Own Vehicle', 'Other Vehicle'];
+
   const findEvent = (id) => Store.state.itinerary.find((e) => e.id === id);
 
   /** "2027-01-22T14:30:00+05:30" → "2027-01-22T14:30" for <input type="datetime-local"> (sheet's wall time). */
@@ -1612,7 +1632,7 @@
     },
 
     /** Opens a create form in the modal (outside #view, so background refreshes never wipe a draft). */
-    openCreateForm({ eyebrow, title, fields, submitLabel, key, collect, submit }) {
+    openCreateForm({ eyebrow, title, fields, submitLabel, key, collect, submit, mount }) {
       Modal.open(`
         <p class="eyebrow">${eyebrow}</p>
         <h3 class="font-display text-2xl text-kumkum-700">${title}</h3>
@@ -1638,13 +1658,13 @@
             confirm.disabled = false;
             confirm.textContent = submitLabel;
           });
+          mount?.(form);
           setTimeout(() => form.querySelector('input')?.focus(), 0); // Modal.open focuses the first button after onMount
         },
       });
     },
 
     openAddEvent() {
-      const days = [...new Set(Store.state.itinerary.map((e) => e.day).filter(Boolean))];
       this.openCreateForm({
         eyebrow: 'Event Control',
         title: 'Add a ceremony',
@@ -1652,17 +1672,49 @@
         key: 'event:add',
         fields: `
           ${field('Title', '<input name="title" required maxlength="200" placeholder="Haldi" class="input" />')}
-          ${field('Day', `<input name="day" required maxlength="200" list="event-days" placeholder="${escapeHtml(days[0] || 'Sat, Jan 23')}" class="input" />
-            <datalist id="event-days">${days.map((d) => `<option value="${escapeHtml(d)}"></option>`).join('')}</datalist>`)}
           <div class="grid grid-cols-2 gap-2">
+            ${field('Day', '<input name="day" type="date" required class="input" />')}
             ${field('Time', '<input name="time" type="time" class="input" />')}
-            ${field('Location', '<input name="location" maxlength="200" placeholder="Lawn" class="input" />')}
+          </div>
+          ${field('Location name (shown to guests)', '<input name="location" maxlength="200" placeholder="Lawn, Hotel Leela" class="input" />')}
+          <div>
+            ${field('Google Maps link (optional)', '<input name="mapLink" type="url" inputmode="url" maxlength="500" placeholder="https://maps.app.goo.gl/…" class="input" />')}
+            <div class="mt-1.5 flex flex-wrap gap-2">
+              <button type="button" data-form="use-location" class="btn btn-ghost btn-sm min-h-[44px]">📍 Use my current location</button>
+              <button type="button" data-form="find-on-maps" class="btn btn-ghost btn-sm min-h-[44px]">🔎 Find on Google Maps</button>
+            </div>
+            <p class="mt-1 text-[11px] text-ink-500">Tapping the ceremony takes guests to this pin. In Google Maps, tap <b>Share → Copy link</b> and paste it here. Leave blank to search by the location name.</p>
           </div>
           <p class="text-xs text-ink-500">New ceremonies start as <b>Upcoming</b>. Use <b>Set Live &amp; Broadcast</b> when it begins.</p>`,
+        mount: (form) => {
+          openPickerOnTap(form.elements.day);
+          openPickerOnTap(form.elements.time);
+          const link = form.elements.mapLink;
+          form.querySelector('[data-form="find-on-maps"]').addEventListener('click', () => {
+            const name = form.elements.location.value.trim();
+            window.open(name ? mapsSearch(name) : 'https://www.google.com/maps', '_blank', 'noopener,noreferrer');
+          });
+          const here = form.querySelector('[data-form="use-location"]');
+          here.addEventListener('click', () => {
+            if (!navigator.geolocation) { Toast.show('Location isn’t available on this device.', 'error'); return; }
+            here.disabled = true;
+            navigator.geolocation.getCurrentPosition((pos) => {
+              const { latitude, longitude } = pos.coords;
+              link.value = mapsSearch(`${latitude.toFixed(6)},${longitude.toFixed(6)}`);
+              here.disabled = false;
+              Toast.show('Pinned your current location 📍', 'success');
+            }, () => {
+              here.disabled = false;
+              Toast.show('Couldn’t get your location. Allow location access, or paste a Maps link.', 'error');
+            }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
+          });
+        },
         collect: (form) => {
           const v = formValues(form);
-          if (!v.title || !v.day) { Toast.show('Please add a title and a day.', 'error'); return null; }
-          return { title: v.title, day: v.day, time: to12h(v.time), location: v.location };
+          const day = toDayLabel(v.day);
+          if (!v.title || !day) { Toast.show('Please add a title and pick a day.', 'error'); return null; }
+          if (v.mapLink && !isMapsUrl(v.mapLink)) { Toast.show('Paste a Google Maps link (https://maps.app.goo.gl/… or https://www.google.com/maps/…), or leave it blank.', 'error'); return null; }
+          return { title: v.title, day, time: to12h(v.time), location: v.location, mapLink: v.mapLink };
         },
         submit: async (payload, key) => {
           const data = await this.run(key, () => Api.post('addEvent', payload), `“${payload.title}” added 🪔`);
@@ -1697,10 +1749,14 @@
           ${field('Arrival (pick-up)', `<input name="arrival" type="datetime-local" value="${attr(toLocalInput(g.arrival))}" class="input" />${keepNote(g.arrival)}`)}
           ${field('Departure (drop)', `<input name="departure" type="datetime-local" value="${attr(toLocalInput(g.departure))}" class="input" />${keepNote(g.departure)}`)}
           <div class="grid grid-cols-2 gap-2">
-            ${field('Mode', `<input name="mode" maxlength="200" list="pickup-modes" placeholder="Flight" value="${attr(g.mode)}" class="input" />
-              <datalist id="pickup-modes">${['Flight', 'Train', 'Car', 'Bus'].map((m) => `<option value="${m}"></option>`).join('')}</datalist>`)}
+            ${field('Mode', `<select name="mode" class="input">
+              <option value="">Select…</option>
+              ${(g.mode && !TRAVEL_MODE_OPTIONS.includes(g.mode) ? [g.mode, ...TRAVEL_MODE_OPTIONS] : TRAVEL_MODE_OPTIONS)
+                .map((m) => `<option value="${attr(m)}" ${m === g.mode ? 'selected' : ''}>${attr(m)}</option>`).join('')}
+            </select>`)}
             ${editing ? '' : field('Pick-up status', '<select name="pickupStatus" class="input"><option>Pending</option><option>Picked Up</option></select>')}
           </div>`,
+        mount: (form) => ['arrival', 'departure'].forEach((n) => openPickerOnTap(form.elements[n])),
         collect: (form) => {
           const v = formValues(form);
           if (!v.name) { Toast.show('Please add a name.', 'error'); return null; }

@@ -70,7 +70,7 @@ function makeBackend() {
       if (body.action === 'updateMemberRole') members.find((x) => x.email === p.email).role = p.role;
       if (body.action === 'removeMember') members.splice(members.findIndex((x) => x.email === p.email), 1);
       if (body.action === 'addEvent') {
-        itinerary.push({ id: String(itinerary.length + 1), day: p.day, time: p.time, title: p.title, location: p.location, status: 'Upcoming' });
+        itinerary.push({ id: String(itinerary.length + 1), day: p.day, time: p.time, title: p.title, location: p.location, mapLink: p.mapLink, status: 'Upcoming' });
         return { ok: true, data: { itinerary } };
       }
       if (body.action === 'addPickup') {
@@ -214,12 +214,17 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     await page.click('[data-tab="control"]');
     await page.click('[data-action="add-event"]');
     await page.fill('#modal-root input[name="title"]', 'Haldi');
-    await page.fill('#modal-root input[name="day"]', 'Sat');
+    assert((await page.getAttribute('#modal-root input[name="day"]', 'type')) === 'date', 'day is a date picker');
+    await page.fill('#modal-root input[name="day"]', '2027-01-23');
     await page.fill('#modal-root input[name="time"]', '19:05');
     await page.fill('#modal-root input[name="location"]', 'Lawn');
+    await page.fill('#modal-root input[name="mapLink"]', 'javascript:alert(1)');
+    await page.click('#modal-root [data-modal="confirm"]');
+    assert(await page.isVisible('#modal-root [role="dialog"]'), 'non-Maps link rejected');
+    await page.fill('#modal-root input[name="mapLink"]', 'https://maps.app.goo.gl/abc123');
     await page.click('#modal-root [data-modal="confirm"]');
     await page.waitForSelector('#view >> text=Haldi');
-    assert(backend.itinerary.some((e) => e.title === 'Haldi' && e.day === 'Sat' && e.time === '7:05 PM'), 'event created with 12h time');
+    assert(backend.itinerary.some((e) => e.title === 'Haldi' && e.day === 'Sat, Jan 23' && e.time === '7:05 PM' && e.mapLink === 'https://maps.app.goo.gl/abc123'), 'event created with day label, 12h time and map link');
     assert(!(await page.$('#modal-root [role="dialog"]')), 'create modal closed');
 
     await page.click('[data-tab="pickups"]');
@@ -235,11 +240,12 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     console.log('Admin edits travel and tracks drops');
     await page.click('[data-action="edit-pickup"][data-id="G1"]');
     assert((await page.inputValue('#modal-root input[name="arrival"]')) === '2027-01-22T14:30', 'edit form prefilled with the arrival');
-    await page.fill('#modal-root input[name="mode"]', 'Flight');
+    assert((await page.inputValue('#modal-root select[name="mode"]')) === 'Train', 'mode prefilled');
+    await page.selectOption('#modal-root select[name="mode"]', 'Plane');
     await page.click('#modal-root [data-modal="confirm"]');
     await page.waitForSelector('#modal-root [role="dialog"]', { state: 'detached' });
     const verma = backend.logistics.find((g) => g.id === 'G1');
-    assert(verma.mode === 'Flight' && verma.arrival === '2027-01-22T14:30' && verma.email === 'viewer@gmail.com', 'travel edited, other fields kept');
+    assert(verma.mode === 'Plane' && verma.arrival === '2027-01-22T14:30' && verma.email === 'viewer@gmail.com', 'travel edited, other fields kept');
     await page.click('[data-action="logistics-mode"][data-value="drop"]');
     await page.waitForSelector('[data-action="toggle-dropoff"][data-id="G2"]');
     await page.click('[data-action="toggle-dropoff"][data-id="G2"]');

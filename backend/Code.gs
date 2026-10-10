@@ -55,6 +55,8 @@ var HEADERS = {
 // Columns added in later versions. Read paths tolerate their absence; setup()
 // (or the first write that needs them) appends them to the right of existing data.
 var OPTIONAL_HEADERS = {
+  // MapLink: optional Google Maps link guests are taken to when they tap the ceremony's location.
+  Itinerary: ['MapLink'],
   Members: ['TourStatus', 'TourCompletedAt'],
   // Email links a travel row to the Atithi who sees it on "My travel"; DropStatus tracks the departure drop-off.
   Logistics: ['Email', 'DropStatus'],
@@ -320,13 +322,15 @@ var ACTIONS_ = {
     var day = requireString_(payload.day, 'day');
     var time = optionalString_(payload.time, 'time');
     var location = optionalString_(payload.location, 'location');
+    var mapLink = optionalMapLink_(payload.mapLink);
+    if (mapLink) ensureColumns_(SHEETS.ITINERARY, OPTIONAL_HEADERS.Itinerary);
 
     // New events always start as Upcoming; going Live (with push) is a separate, deliberate action.
     var table = readTable_(SHEETS.ITINERARY);
     var id = nextId_(table, 'EventID', DEFAULT_ID_PREFIX.Itinerary);
-    appendRecord_(table, { EventID: id, Day: day, Time: time, Title: title, Location: location, Status: 'Upcoming' });
+    appendRecord_(table, { EventID: id, Day: day, Time: time, Title: title, Location: location, MapLink: mapLink, Status: 'Upcoming' });
     writeAudit_(user.email, AUDIT_CATEGORY.EVENT, 'Added Event ' + id + ' ("' + title + '") on ' + day +
-      (time ? ' at ' + time : '') + (location ? ' @ ' + location : ''), req.timestamp);
+      (time ? ' at ' + time : '') + (location ? ' @ ' + location : '') + (mapLink ? ' (map: ' + mapLink + ')' : ''), req.timestamp);
 
     return { eventId: id, itinerary: refreshItineraryCache_() };
   },
@@ -666,6 +670,7 @@ function toEvent_(v, statusOverride) {
     time: formatTime_(v.Time),
     title: String(v.Title || '').trim(),
     location: String(v.Location || '').trim(),
+    mapLink: isMapsUrl_(String(v.MapLink || '').trim()) ? String(v.MapLink).trim() : '',
     status: EVENT_STATUSES.indexOf(status) >= 0 ? status : 'Upcoming',
   };
 }
@@ -903,6 +908,23 @@ function appendSafe_(sheetName, values) {
 
 function optionalString_(value, field) {
   return value == null || String(value).trim() === '' ? '' : requireString_(value, field);
+}
+
+// Google Maps https links only: these become hrefs in the app, so nothing else (javascript:, other sites) is allowed.
+var MAPS_URL_RE = /^https:\/\/(?:(?:www\.|maps\.)?google\.[a-z.]{2,6}\/maps|maps\.google\.[a-z.]{2,6}\/|maps\.app\.goo\.gl\/|goo\.gl\/maps\/)[^\s"'<>]*$/i;
+var MAX_MAP_LINK_LENGTH = 500;
+
+function isMapsUrl_(url) {
+  return typeof url === 'string' && url.length <= MAX_MAP_LINK_LENGTH && MAPS_URL_RE.test(url);
+}
+
+function optionalMapLink_(value) {
+  var url = value == null ? '' : String(value).trim();
+  if (!url) return '';
+  if (!isMapsUrl_(url)) {
+    throw new AppError('BAD_REQUEST', '"mapLink" must be a Google Maps link (https://maps.app.goo.gl/… or https://www.google.com/maps/…).');
+  }
+  return url;
 }
 
 function optionalCount_(value, field) {

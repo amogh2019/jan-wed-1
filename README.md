@@ -19,7 +19,7 @@ Every admin action sends the admin's email and a timestamp. `Code.gs` writes the
 
 | Tab | Columns |
 |---|---|
-| `Itinerary` | EventID, Day, Time, Title, Location, Status (`Upcoming`/`Live`/`Completed`) |
+| `Itinerary` | EventID, Day, Time, Title, Location, Status (`Upcoming`/`Live`/`Completed`); optional MapLink (Google Maps link the location opens) |
 | `Logistics` | ID, Name, Members, Contact, ArrivalDateTime, DepartureDateTime, Mode, PickupStatus (`Pending`/`Picked Up`), Email (optional, the guest's Google email), DropStatus (optional, `Pending`/`Dropped Off`) |
 | `Members` | Email, Role (`Admin`/`Atithi`), AddedBy, AddedDate, TourStatus (`Pending`/`Completed`/`Skipped`), TourCompletedAt |
 | `AuditLog` | Timestamp, UserEmail, ActionCategory, Details |

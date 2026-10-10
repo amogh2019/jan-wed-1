@@ -247,7 +247,7 @@ test('tour: rejects bad status and non-members', () => {
 test('setup: creates missing tabs and headers on an empty workbook', () => {
   const b = createBackend({ members: [], overrides: { Itinerary: null, Logistics: null, Members: null, AuditLog: null } });
   b.sandbox.setup();
-  assert.deepEqual(b.sheets.Itinerary.data[0], ['EventID', 'Day', 'Time', 'Title', 'Location', 'Status']);
+  assert.deepEqual(b.sheets.Itinerary.data[0], ['EventID', 'Day', 'Time', 'Title', 'Location', 'Status', 'MapLink']);
   assert.deepEqual(b.sheets.Members.data[0], ['Email', 'Role', 'AddedBy', 'AddedDate', 'TourStatus', 'TourCompletedAt']);
   assert.equal(b.sheets.Members.data[1][0], 'owner@example.com');
   assert.equal(b.sheets.Members.data[1][1], 'Admin');
@@ -270,7 +270,7 @@ test('setup: existing data is preserved; missing columns appended; only blank ce
   const summary = b.sandbox.setup();
 
   const it = b.sheets.Itinerary.data;
-  assert.deepEqual(it[0], ['title', 'EventID', 'Day', 'Time', 'Location', ' status ', 'Notes'], 'headers not renamed/reordered');
+  assert.deepEqual(it[0], ['title', 'EventID', 'Day', 'Time', 'Location', ' status ', 'Notes', 'MapLink'], 'existing headers kept in place; new column appended');
   assert.equal(it[1][5], 'Upcoming', 'blank status backfilled');
   assert.equal(it[2][5], 'Live', 'filled status untouched');
   assert.equal(it[1][6], 'bring henna', 'extra column preserved');
@@ -351,6 +351,24 @@ test('addEvent: validates input and neutralises formulas', () => {
   assert.equal(b.call(ADMIN, 'addEvent', { title: 'X'.repeat(201), day: 'Day 1' }).code, 'BAD_REQUEST');
   assert.equal(b.call(ADMIN, 'addEvent', { title: '=IMPORTXML("x")', day: 'Day 1' }).ok, true);
   assert.equal(b.sheets.Itinerary.data.at(-1)[3], '\'=IMPORTXML("x")');
+});
+
+test('addEvent: optional Google Maps link adds the MapLink column only when used, and is allow-listed', () => {
+  const b = createBackend();
+  const before = b.sheets.Itinerary.data[0].length;
+  assert.equal(b.call(ADMIN, 'addEvent', { title: 'A', day: 'Day 1' }).ok, true);
+  assert.equal(b.sheets.Itinerary.data[0].length, before, 'no column added without a link');
+  for (const bad of ['javascript:alert(1)', 'http://maps.app.goo.gl/x', 'https://evil.com/maps', 'https://maps.app.goo.gl.evil.com/x', 'https://www.google.com/search?q=x']) {
+    assert.equal(b.call(ADMIN, 'addEvent', { title: 'B', day: 'Day 1', mapLink: bad }).code, 'BAD_REQUEST', bad);
+  }
+  const out = b.call(ADMIN, 'addEvent', { title: 'C', day: 'Day 1', location: 'Lawn', mapLink: 'https://maps.app.goo.gl/abc123' });
+  assert.equal(out.ok, true);
+  assert.equal(b.sheets.Itinerary.data[0].at(-1), 'MapLink');
+  assert.equal(out.data.itinerary.at(-1).mapLink, 'https://maps.app.goo.gl/abc123');
+  assert.equal(out.data.itinerary.at(-2).mapLink, '');
+  assert.match(b.audit().at(-1)[3], /map: https:\/\/maps\.app\.goo\.gl\/abc123/);
+  const coords = b.call(ADMIN, 'addEvent', { title: 'D', day: 'Day 1', mapLink: 'https://www.google.com/maps/search/?api=1&query=12.971600,77.594600' });
+  assert.equal(coords.ok, true, 'current-location links are accepted');
 });
 
 test('addPickup: appends with a prefixed ID, parses date-times, audited', () => {
