@@ -27,6 +27,9 @@ window.APP_CONFIG = Object.freeze({
   // Auto-refresh cadence for public data while the app is visible
   REFRESH_INTERVAL_MS: 60000,
 
+  FAMILY_CONTACT_NAME: "Sh Family!",
+  FAMILY_CONTACT_PHONE: "Ping the family member you know on Whatsapp"
+
   // Network timeout for backend calls
   REQUEST_TIMEOUT_MS: 25000,
 });
