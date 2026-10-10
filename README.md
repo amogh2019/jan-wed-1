@@ -49,7 +49,8 @@ In Google Cloud Console, go to **APIs & Services → Credentials → Create OAut
 Under **Authorized JavaScript origins**, add `https://<user>.github.io` and `http://localhost:8000` (for local testing).
 
 ### 3. OneSignal
-Create a **Web** app and choose *Typical Site*. Set the Site URL to `https://<user>.github.io/<repo>/`.
+Create a **Web** app and choose **Custom Code** (not *Typical Site*). Set the Site URL to `https://<user>.github.io` (the origin only, no path).
+With *Typical Site*, OneSignal ignores the service-worker path in `app.js` and looks for `/OneSignalSDKWorker.js` at the domain root, which GitHub Pages project sites don't have. No device can subscribe, and `testPush()` returns "All included players are not subscribed".
 You do **not** need to upload OneSignal's service-worker file: [`service-worker.js`](service-worker.js) already imports it.
 Optionally, run `testPush()` in Apps Script to check delivery.
 

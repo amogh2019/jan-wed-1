@@ -623,7 +623,11 @@ function sendLivePush_(event) {
       return { attempted: true, ok: true, id: parsed.id || null };
     }
     var msg = parsed.errors ? JSON.stringify(parsed.errors) : 'HTTP ' + code;
-    return { attempted: true, ok: false, error: msg.slice(0, 300) };
+    if (/not subscribed/i.test(msg)) {
+      msg += ' \u2014 no device has finished subscribing yet. If phones did tap "Notify me", check OneSignal'
+        + ' \u2192 Settings \u2192 Push & In-App \u2192 Web: integration must be "Custom Code" (see DEVELOPER_GUIDE "Push").';
+    }
+    return { attempted: true, ok: false, error: msg.slice(0, 400) };
   } catch (err) {
     return { attempted: true, ok: false, error: String(err && err.message || err).slice(0, 300) };
   }

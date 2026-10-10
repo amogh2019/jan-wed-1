@@ -725,7 +725,7 @@
           <div class="welcome-line delay-3 paisley-divider my-5" aria-hidden="true"></div>
           <h2 id="welcome-title" class="welcome-line delay-3 font-display text-3xl text-ivory-50">स्वागतम्, ${escapeHtml(firstNameOf(user))} ji 🙏</h2>
           <p class="welcome-line delay-3 mt-2 text-sm text-ivory-100/90">
-            ${isAdmin ? 'Thank you for hosting with us. Everything you need to run' : 'With joy in our hearts, we welcome you to'} <b class="text-haldi-200">${eventName}</b>.
+            ${isAdmin ? 'Welcome back! Here is your central dashboard to manage and run' : 'With joy in our hearts, we welcome you to'} <b class="text-haldi-200">${eventName}</b>.
           </p>
           ${hosts}
           <div class="welcome-line delay-4 mt-6 flex items-center justify-center gap-3 text-2xl" aria-hidden="true">
