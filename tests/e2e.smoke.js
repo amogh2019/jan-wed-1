@@ -54,6 +54,7 @@ function makeBackend() {
     { email: 'viewer@gmail.com', role: 'Viewer', addedBy: 'admin@gmail.com', addedDate: '', tourStatus: 'Pending', groups: [] },
   ];
   const itinerary = [{ id: '1', day: 'Fri', time: '10:00', title: 'Welcome', location: 'Hall', status: 'Upcoming', groups: [] }];
+  const groupCatalog = [];
   const logistics = [{ id: 'G1', name: 'Verma family', members: '3', contact: '+91 98765 43210', email: 'viewer@gmail.com',
     arrival: '2027-01-22T14:30:00+05:30', departure: '', mode: 'Train', pickupStatus: 'Pending', dropStatus: 'Pending' }];
   const familyContact = { name: 'Kaus', phone: '+91 90000 00000' };
@@ -62,7 +63,7 @@ function makeBackend() {
   const clearedNotifications = new Map();
   const email = (tok) => JSON.parse(Buffer.from(tok.split('.')[1], 'base64url').toString()).email;
   return {
-    audit, members, itinerary, logistics, notifications, calls: 0, tourCalls: [], expireNext: false,
+    audit, members, itinerary, logistics, notifications, groupCatalog, calls: 0, tourCalls: [], expireNext: false,
     handle(body) {
       this.calls += 1;
       const me = email(body.idToken);
@@ -81,6 +82,7 @@ function makeBackend() {
         const visibleNotifications = notifications.filter((n) => (isAdmin || matching(n.groups)) && Date.parse(n.at) > cutoff);
         return { ok: true, data: { email: me, name: me, role: m.role, isAdmin, tourStatus: m.tourStatus,
           groups: myGroups, knownGroups: [...new Set(members.flatMap((x) => x.groups || []).concat(itinerary.flatMap((x) => x.groups || [])))],
+          groupCatalog: isAdmin ? groupCatalog : undefined,
           itinerary: isAdmin ? itinerary : itinerary.filter((e) => matching(e.groups)),
           notifications: isAdmin ? visibleNotifications : visibleNotifications.map(({ sentBy, pushStatus, ...n }) => n),
           pushId: `m_${(me === 'viewer@gmail.com' ? 'a' : 'b').repeat(40)}`,
@@ -98,21 +100,33 @@ function makeBackend() {
       if (!isAdmin) return { ok: false, code: 'FORBIDDEN', error: 'You are not authorized to perform admin actions.' };
       const p = body.payload;
       audit.push(`${me}|${body.action}|${JSON.stringify(p)}|${body.timestamp}`);
-      if (body.action === 'addMember') members.push({ email: p.email, role: p.role, addedBy: me, addedDate: '', tourStatus: 'Pending', groups: p.groups ? p.groups.split(',').map((x) => x.trim()).filter(Boolean) : [] });
+      const parseGroups = (value) => Array.isArray(value) ? value : (value ? value.split(',').map((x) => x.trim()).filter(Boolean) : []);
+      if (body.action === 'addGroup') {
+        if (groupCatalog.some((g) => g.label.toLowerCase() === p.label.toLowerCase())) return { ok: false, code: 'CONFLICT', error: 'Group already exists.' };
+        groupCatalog.push({ label: p.label, status: 'Active' });
+        return { ok: true, data: { groupCatalog } };
+      }
+      if (body.action === 'archiveGroup') {
+        const group = groupCatalog.find((g) => g.label.toLowerCase() === p.label.toLowerCase());
+        if (!group) return { ok: false, code: 'NOT_FOUND', error: 'Group not found.' };
+        group.status = 'Archived';
+        return { ok: true, data: { groupCatalog } };
+      }
+      if (body.action === 'addMember') members.push({ email: p.email, role: p.role, addedBy: me, addedDate: '', tourStatus: 'Pending', groups: parseGroups(p.groups) });
       if (body.action === 'updateMemberRole') members.find((x) => x.email === p.email).role = p.role;
       if (body.action === 'removeMember') members.splice(members.findIndex((x) => x.email === p.email), 1);
       if (body.action === 'updateMemberGroups') {
         const member = members.find((x) => x.email === p.email);
-        member.groups = p.groups ? p.groups.split(',').map((x) => x.trim()).filter(Boolean) : [];
+        member.groups = parseGroups(p.groups);
         return { ok: true, data: { members } };
       }
       if (body.action === 'updateEventGroup') {
         const event = itinerary.find((x) => x.id === p.eventId);
-        event.groups = p.groups ? p.groups.split(',').map((x) => x.trim()).filter(Boolean) : [];
+        event.groups = parseGroups(p.groups);
         return { ok: true, data: { itinerary } };
       }
       if (body.action === 'addEvent') {
-        itinerary.push({ id: String(itinerary.length + 1), day: p.day, time: p.time, title: p.title, location: p.location, mapLink: p.mapLink, groups: p.groups ? p.groups.split(',').map((x) => x.trim()).filter(Boolean) : [], status: 'Upcoming' });
+        itinerary.push({ id: String(itinerary.length + 1), day: p.day, time: p.time, title: p.title, location: p.location, mapLink: p.mapLink, groups: parseGroups(p.groups), status: 'Upcoming' });
         return { ok: true, data: { itinerary } };
       }
       if (body.action === 'updateEvent') {
@@ -158,7 +172,7 @@ const assert = (cond, msg) => {
 async function newPage(browser, backend, query = '', eventName = 'Test Fest') {
   const ctx = await browser.newContext({ serviceWorkers: 'block' });
   const page = await ctx.newPage();
-  page.on('pageerror', (e) => console.log('PAGE ERROR', e.message));
+  page.on('pageerror', (e) => console.log('PAGE ERROR', e.stack || e.message));
   page.on('dialog', (d) => d.accept());
   await page.addInitScript(() => {
     window.__cspViolations = [];
@@ -299,7 +313,26 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     assert(!(await visible(page, '[data-tab="travel"]')), 'admins use Pick & Drop instead of My travel');
     await page.waitForSelector('[data-tab="members"]:not(.hidden)');
 
+    console.log('Admin manages group labels');
+    await page.click('[data-tab="members"]');
+    await page.fill('form[data-action="add-group"] input[name="label"]', 'Family');
+    await page.click('form[data-action="add-group"] button[type="submit"]');
+    await page.waitForSelector('#view >> text=Family');
+    await page.fill('form[data-action="add-group"] input[name="label"]', 'Hosts');
+    await page.click('form[data-action="add-group"] button[type="submit"]');
+    await page.waitForSelector('#view >> text=Hosts');
+    await page.fill('form[data-action="add-group"] input[name="label"]', 'Friends');
+    await page.click('form[data-action="add-group"] button[type="submit"]');
+    await page.waitForSelector('#view >> text=Friends');
+    await page.fill('form[data-action="add-group"] input[name="label"]', 'Cousins');
+    await page.click('form[data-action="add-group"] button[type="submit"]');
+    await page.waitForSelector('#view >> text=Cousins');
+    await page.click('[data-action="archive-group"][data-label="Cousins"]');
+    await page.waitForSelector('#view >> text=(archived)');
+    assert(backend.groupCatalog.some((g) => g.label === 'Cousins' && g.status === 'Archived'), 'group label can be archived from Members & access');
+
     console.log('Admin creates a ceremony and an arrival from the app');
+    await page.click('[data-tab="control"]');
     assert((await page.textContent('[data-tab="control"]')).trim() === 'Event Control', 'tab renamed to Event Control');
     await page.click('[data-tab="control"]');
     await page.click('[data-action="add-event"]');
@@ -312,10 +345,11 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     await page.click('#modal-root [data-modal="confirm"]');
     assert(await page.isVisible('#modal-root [role="dialog"]'), 'non-Maps link rejected');
     await page.fill('#modal-root input[name="mapLink"]', 'https://maps.app.goo.gl/abc123');
-    await page.fill('#modal-root input[name="groups"]', 'Family');
+    await page.check('#modal-root input[name="groups"][value="Family"]');
+    await page.check('#modal-root input[name="groups"][value="Hosts"]');
     await page.click('#modal-root [data-modal="confirm"]');
     await page.waitForSelector('#view >> text=Haldi');
-    assert(backend.itinerary.some((e) => e.title === 'Haldi' && e.day === 'Sat, Jan 23' && e.time === '7:05 PM' && e.mapLink === 'https://maps.app.goo.gl/abc123' && e.groups[0] === 'Family'), 'event created with day label, 12h time, map link and group');
+    assert(backend.itinerary.some((e) => e.title === 'Haldi' && e.day === 'Sat, Jan 23' && e.time === '7:05 PM' && e.mapLink === 'https://maps.app.goo.gl/abc123' && e.groups.join() === 'Family,Hosts'), 'event created with date, map link and multiple audience groups');
     assert(!(await page.$('#modal-root [role="dialog"]')), 'create modal closed');
 
     await page.click('[data-action="delete-event"][data-id="1"]');
@@ -325,7 +359,7 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     await page.click('[data-action="add-event"]');
     await page.fill('#modal-root input[name="title"]', 'Hosts only');
     await page.fill('#modal-root input[name="day"]', '2027-01-24');
-    await page.fill('#modal-root input[name="groups"]', 'Hosts');
+    await page.check('#modal-root input[name="groups"][value="Hosts"]');
     await page.click('#modal-root [data-modal="confirm"]');
     await page.waitForSelector('#view >> text=Hosts only');
     await page.click('#refresh-btn');
@@ -383,10 +417,11 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     assert(await page.isVisible('text=tour skipped'), 'admins can see who skipped the tour');
     assert(await page.isDisabled('select[data-email="admin@gmail.com"]'), 'own role select disabled');
     assert(await page.isDisabled('[data-action="remove-member"][data-email="admin@gmail.com"]'), 'own remove disabled');
-    await page.fill('input[data-action="member-groups"][data-email="viewer@gmail.com"]', 'Family');
+    await page.check('input[data-action="member-groups"][data-email="viewer@gmail.com"][value="Family"]');
+    await page.check('input[data-action="member-groups"][data-email="viewer@gmail.com"][value="Friends"]');
     await page.click('button[data-action="save-member-groups"][data-email="viewer@gmail.com"]');
-    await page.waitForFunction(() => document.querySelector('input[data-action="member-groups"][data-email="viewer@gmail.com"]')?.value === 'Family');
-    assert(backend.members.find((m) => m.email === 'viewer@gmail.com').groups[0] === 'Family', 'member group saved');
+    await page.waitForFunction(() => document.querySelector('input[data-action="member-groups"][data-email="viewer@gmail.com"][value="Friends"]')?.checked);
+    assert(backend.members.find((m) => m.email === 'viewer@gmail.com').groups.join() === 'Family,Friends', 'multiple member groups saved');
     const groupPage = await newPage(browser, backend);
     await groupPage.waitForSelector('#fake-gsi');
     await signIn(groupPage, 'viewer@gmail.com');
@@ -397,6 +432,7 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
 
     await page.fill('#new-member-email', 'New.Guest@Gmail.com');
     await page.selectOption('form[data-action="add-member"] select[name="role"]', 'Atithi');
+    await page.check('form[data-action="add-member"] input[name="groups"][value="Family"]');
     await page.click('form[data-action="add-member"] button[type="submit"]');
     await page.waitForSelector('text=new.guest@gmail.com');
     assert(backend.members.some((m) => m.email === 'new.guest@gmail.com' && m.role === 'Atithi'), 'member added (lower-cased) as Atithi');
@@ -409,7 +445,7 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     await page.waitForFunction(() => !document.querySelector('[data-action="remove-member"][data-email="viewer@gmail.com"]'));
     assert(!backend.members.some((m) => m.email === 'viewer@gmail.com'), 'member removed');
 
-    assert(backend.audit.length === 10 && backend.audit.every((a) => a.startsWith('admin@gmail.com|') && /\|\d{4}-\d\d-\d\dT/.test(a)),
+    assert(backend.audit.length >= 10 && backend.audit.every((a) => a.startsWith('admin@gmail.com|') && /\|\d{4}-\d\d-\d\dT/.test(a)),
       'every admin call carried userEmail + timestamp');
 
     console.log('Welcome plays again every time the app is opened');

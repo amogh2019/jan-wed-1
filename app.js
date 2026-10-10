@@ -110,6 +110,7 @@
       notifications: [],
       groups: [],
       knownGroups: [],
+      groupCatalog: [],
       pushId: '',
       eventGroupsDrafts: {},
       memberGroupsDrafts: {},
@@ -277,7 +278,7 @@
       Store.set({
         user: { email: last.email, name: last.name || last.email, picture: safePicture(last.picture) },
         authStatus: 'offline', role: GUEST_ROLE, isAdmin: false, logistics: [], members: [], myTravel: [],
-        itinerary: cache.itinerary, notifications: [], groups: [], knownGroups: [], pushId: '',
+        itinerary: cache.itinerary, notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '',
         eventGroupsDrafts: {}, memberGroupsDrafts: {}, lastSynced: cache.savedAt,
       });
       this.scheduleOfflineExpiry(savedAt);
@@ -363,6 +364,7 @@
         notifications: Array.isArray(data.notifications) ? data.notifications : [],
         groups: Array.isArray(data.groups) ? data.groups : [],
         knownGroups: Array.isArray(data.knownGroups) ? data.knownGroups : [],
+        groupCatalog: Array.isArray(data.groupCatalog) ? data.groupCatalog : [],
         pushId: typeof data.pushId === 'string' ? data.pushId : '',
         eventGroupsDrafts: {},
         memberGroupsDrafts: {},
@@ -393,7 +395,7 @@
       storage.remove(STORAGE.CREDENTIAL);
       storage.remove(STORAGE.LAST_USER);
       storage.remove(STORAGE.DATA_CACHE);
-      Store.set({ user: null, role: null, isAdmin: false, loading: false, itinerary: [], logistics: [], members: [], myTravel: [], notifications: [], groups: [], knownGroups: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, familyContact: null, tab: 'schedule', lastSynced: null, ...patch });
+      Store.set({ user: null, role: null, isAdmin: false, loading: false, itinerary: [], logistics: [], members: [], myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, familyContact: null, tab: 'schedule', lastSynced: null, ...patch });
     },
 
     deny(email) {
@@ -408,7 +410,7 @@
       void Push.logout();
       sessionStore.remove(STORAGE.CREDENTIAL);
       // Admin-only data must not linger on screen after the session ends.
-      Store.set({ authStatus: 'signed-out', user: null, isAdmin: false, role: null, logistics: [], members: [], myTravel: [], notifications: [], groups: [], knownGroups: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, loading: false, tab: 'schedule' });
+      Store.set({ authStatus: 'signed-out', user: null, isAdmin: false, role: null, logistics: [], members: [], myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, loading: false, tab: 'schedule' });
       Modal.close();
       Tour.cancel();
       this.prompt();
@@ -822,8 +824,9 @@
           <div class="welcome-line delay-3 paisley-divider my-5" aria-hidden="true"></div>
           <h2 id="welcome-title" class="welcome-line delay-3 font-display text-3xl text-ivory-50">स्वागतम्, ${escapeHtml(firstNameOf(user))} ji 🙏</h2>
           <p class="welcome-line delay-3 mt-2 text-sm text-ivory-100/90">
-            ${isAdmin ? 'Welcome back! Here is your central dashboard to manage and run' : 'With joy in our hearts, we welcome you to'} <b class="text-haldi-200">${eventName}</b>.
+            ${isAdmin ? 'Welcome back! Here is your central dashboard to manage and run' : 'With joy in our hearts, we welcome you to'}
           </p>
+          <b class="text-haldi-200">${eventName}</b>
           ${hosts}
           <div class="welcome-line delay-4 mt-6 flex items-center justify-center gap-3 text-2xl" aria-hidden="true">
             <span class="diya">🪔</span><span class="diya delay-1">🪔</span><span class="diya delay-2">🪔</span>
@@ -1232,18 +1235,37 @@
     },
   };
 
+  const groupPicker = (catalog, selected, action, identity = {}) => {
+    const chosen = new Set(selected.map((label) => label.toLowerCase()));
+    const groups = catalog.filter((group) => group.status === 'Active' || chosen.has(group.label.toLowerCase()));
+    if (!groups.length) return '<p class="text-xs text-ink-500">No groups yet. Add labels in Members &amp; access.</p>';
+    return `<fieldset class="mt-1 grid gap-1.5 rounded-xl border border-haldi-200 p-2">
+      <legend class="sr-only">Select groups</legend>
+      ${groups.map((group) => {
+        const checked = chosen.has(group.label.toLowerCase());
+        const archived = group.status !== 'Active';
+        return `<label class="flex min-h-[44px] items-center gap-2 rounded-lg px-2 text-sm ${archived ? 'text-ink-500' : 'text-ink-700'}">
+          <input type="checkbox" name="groups" value="${escapeHtml(group.label)}" data-action="${action}"
+            ${identity.id ? `data-id="${escapeHtml(identity.id)}"` : ''}
+            ${identity.email ? `data-email="${escapeHtml(identity.email)}"` : ''}
+            ${checked ? 'checked' : ''} ${archived && !checked ? 'disabled' : ''}
+            class="h-4 w-4 accent-kumkum-700" />
+          <span>${escapeHtml(group.label)}${archived ? ' <span class="text-[11px]">(archived)</span>' : ''}</span>
+        </label>`;
+      }).join('')}
+    </fieldset>`;
+  };
+  const checkedGroups = (root) => [...root.querySelectorAll('input[name="groups"]:checked')].map((input) => input.value);
   const addButton = (action, label) => `
     <button data-action="${action}" class="btn btn-primary w-full mb-4">＋ ${label}</button>`;
 
   Views.control = (s) => {
     const header = pageHeader('Host console', 'Event Control', '<b>Set Live &amp; Broadcast</b> updates the sheet, notifies the intended audience and opens WhatsApp with a ready-to-send message.');
-    const groupOptions = `<datalist id="group-label-options">${s.knownGroups.map((g) => `<option value="${escapeHtml(g)}"></option>`).join('')}</datalist>`;
     if (!s.itinerary.length) {
-      return `${header}${groupOptions}${addButton('add-event', 'Add a ceremony')}${emptyState('🎛️', 'No ceremonies yet', 'Add the first ceremony of the celebration above.')}`;
+      return `${header}${addButton('add-event', 'Add a ceremony')}${emptyState('🎛️', 'No ceremonies yet', 'Add the first ceremony of the celebration above.')}`;
     }
     return `
       ${header}
-      ${groupOptions}
       ${addButton('add-event', 'Add a ceremony')}
       <div class="space-y-3">
         ${s.itinerary.map((e) => {
@@ -1270,12 +1292,10 @@
               </select>
               <button data-action="delete-event" data-id="${escapeHtml(e.id)}" ${busy ? 'disabled' : ''} aria-label="Delete ${escapeHtml(e.title)}"
                 class="btn btn-ghost btn-sm col-span-2 min-h-[44px] text-kumkum-700">🗑 Delete ceremony</button>
-              <label class="col-span-2 block text-xs font-semibold text-ink-500">Audience groups (blank = everyone)
-                <span class="mt-1 flex gap-2">
-                  <input data-action="event-groups" data-id="${escapeHtml(e.id)}" list="group-label-options" value="${escapeHtml(s.eventGroupsDrafts[e.id] ?? (e.groups || []).join(', '))}" placeholder="Family, Bride side" class="input py-2 text-sm font-normal" aria-label="Audience groups for ${escapeHtml(e.title)}" />
-                  <button data-action="save-event-groups" data-id="${escapeHtml(e.id)}" class="btn btn-ghost btn-sm shrink-0">Save</button>
-                </span>
-              </label>
+              <div class="col-span-2 block text-xs font-semibold text-ink-500">Audience groups (no selection = everyone)
+                ${groupPicker(s.groupCatalog, s.eventGroupsDrafts[e.id] ?? (e.groups || []), 'event-groups', { id: e.id })}
+                <button data-action="save-event-groups" data-id="${escapeHtml(e.id)}" class="btn btn-ghost btn-sm mt-2 min-h-[44px]">Save audience</button>
+              </div>
             </div>
           </article>`;
         }).join('')}
@@ -1440,8 +1460,8 @@
             <div class="flex-1 min-w-0">
               <p class="text-sm font-medium text-ink-900 truncate">${escapeHtml(m.email)} ${self ? '<span class="ml-1 rounded-full bg-kumkum-600 text-ivory-50 text-[10px] px-2 py-0.5">You</span>' : ''}</p>
               <p class="text-xs text-ink-400 truncate">Added by ${escapeHtml(m.addedBy || '—')}${addedLine(m)} ${tourChip(m.tourStatus)}</p>
-              <label class="block mt-2 text-[11px] text-ink-500">Groups (comma-separated)
-                <input data-action="member-groups" data-email="${escapeHtml(m.email)}" list="group-label-options" value="${escapeHtml(s.memberGroupsDrafts[m.email] ?? (m.groups || []).join(', '))}" placeholder="Family, Bride side" class="input mt-1 min-h-[40px] py-1.5 text-xs" aria-label="Groups for ${escapeHtml(m.email)}" />
+              <label class="block mt-2 text-[11px] text-ink-500">Groups
+                ${groupPicker(s.groupCatalog, s.memberGroupsDrafts[m.email] ?? (m.groups || []), 'member-groups', { email: m.email })}
               </label>
               <button data-action="save-member-groups" data-email="${escapeHtml(m.email)}" class="btn btn-ghost btn-sm mt-1 min-h-[40px]">Save groups</button>
             </div>
@@ -1459,8 +1479,21 @@
 
     return `
       ${pageHeader('Guest list', 'Members &amp; access', 'Only people on this list can open the app. <b>Admins</b> host the event; <b>Atithis</b> (our guests) follow the schedule. Every change is recorded in the AuditLog.')}
-      <datalist id="group-label-options">${s.knownGroups.map((g) => `<option value="${escapeHtml(g)}"></option>`).join('')}</datalist>
       <div class="grid grid-cols-3 gap-2 text-center mb-4">${stat(s.members.length, 'Members')}${stat(adminCount, 'Admins')}${stat(s.members.length - adminCount, 'Atithis')}</div>
+      <section class="card p-4 mb-4">
+        <h3 class="font-display text-xl text-kumkum-700">Group labels</h3>
+        <p class="mt-1 text-xs text-ink-500">Create labels for member access and ceremony audiences. Archiving keeps current assignments but prevents new ones.</p>
+        <form data-action="add-group" class="mt-3 flex gap-2" novalidate>
+          <input name="label" maxlength="30" required placeholder="e.g. Family" aria-label="New group label" class="input min-w-0" />
+          <button type="submit" ${Store.isPending('group:add') ? 'disabled' : ''} class="btn btn-primary shrink-0">${spinnerOr('group:add', 'Add')}</button>
+        </form>
+        ${s.groupCatalog.length ? `<ul class="mt-3 divide-y divide-haldi-100">
+          ${s.groupCatalog.map((group) => `<li class="flex min-h-[48px] items-center justify-between gap-2 py-2">
+            <span class="text-sm text-ink-800">${escapeHtml(group.label)} ${group.status === 'Archived' ? '<span class="text-xs text-ink-500">(archived)</span>' : ''}</span>
+            ${group.status === 'Active' ? `<button type="button" data-action="archive-group" data-label="${escapeHtml(group.label)}" class="btn btn-ghost btn-sm min-h-[44px]">Archive</button>` : ''}
+          </li>`).join('')}
+        </ul>` : emptyState('🏷️', 'No group labels yet', 'Add a label to make it available in member and ceremony forms.')}
+      </section>
       <form data-action="add-member" class="card p-4 mb-4 space-y-2" novalidate>
         <label class="block text-xs font-semibold text-ink-500" for="new-member-email">Invite a guest</label>
         <input id="new-member-email" name="email" type="email" inputmode="email" autocomplete="off" required placeholder="guest@gmail.com" class="input" />
@@ -1470,9 +1503,9 @@
             ${spinnerOr('member:add', 'Add')}
           </button>
         </div>
-        <label class="block text-xs font-semibold text-ink-500">Groups (comma-separated, optional)
-          <input name="groups" list="group-label-options" placeholder="Family, Bride side" class="input mt-1" />
-        </label>
+        <fieldset><legend class="block text-xs font-semibold text-ink-500">Groups (optional)</legend>
+          ${groupPicker(s.groupCatalog, [], 'add-member-groups')}
+        </fieldset>
       </form>
       <input type="search" data-action="member-search" value="${escapeHtml(s.memberSearch)}" placeholder="Search members…" aria-label="Search members" class="input mb-3" />
       ${list.length ? listHtml : empty}`;
@@ -1483,7 +1516,7 @@
     return `
       ${pageHeader('Announcements from the hosts', 'Notifications')}
       <section class="card p-4 mb-3">
-        <p class="text-sm text-ink-600">Announcements sent from Event Control appear here, even if push delivery fails. Messages sent directly from the OneSignal dashboard are not recorded in this history.</p>
+        <p class="text-sm text-ink-600">Announcements sent from Event Control Center appear here.</p>
         <button data-action="clear-notifications" ${!items.length || Store.isPending('notifications:clear') ? 'disabled' : ''} class="btn btn-ghost btn-sm mt-3 min-h-[44px]">
           ${spinnerOr('notifications:clear', 'Clear notifications')}
         </button>
@@ -1588,7 +1621,7 @@
     const focusKey = active?.dataset?.action;
     const caret = focusKey && typeof active.selectionStart === 'number' ? active.selectionStart : null;
     const before = memberFormFields();
-    const draft = before ? { email: before.email.value, role: before.role.value, groups: before.groups.value, focused: active === before.email } : null;
+    const draft = before ? { email: before.email.value, role: before.role.value, groups: checkedGroups(before.form), focused: active === before.email } : null;
 
     $('#view').innerHTML = (Views[s.tab] || Views.schedule)(s);
     applyProgressWidths();
@@ -1597,7 +1630,8 @@
     if (after && draft) {
       after.email.value = draft.email;
       after.role.value = draft.role;
-      after.groups.value = draft.groups;
+      const selectedGroups = new Set(draft.groups);
+      after.form.querySelectorAll('input[name="groups"]').forEach((checkbox) => { checkbox.checked = selectedGroups.has(checkbox.value); });
       if (draft.focused) after.email.focus();
     }
     if (['pickup-search', 'member-search'].includes(focusKey)) {
@@ -1610,9 +1644,9 @@
   function memberFormFields(form = $('form[data-action="add-member"]')) {
     if (!form) return null;
     return {
+      form,
       email: /** @type {HTMLInputElement} */ (form.querySelector('[name="email"]')),
       role: /** @type {HTMLSelectElement} */ (form.querySelector('[name="role"]')),
-      groups: /** @type {HTMLInputElement} */ (form.querySelector('[name="groups"]')),
     };
   }
 
@@ -1741,7 +1775,7 @@
     async updateEventGroups(eventId) {
       const ev = findEvent(eventId);
       if (!ev) return;
-      const groups = Store.state.eventGroupsDrafts[eventId] ?? (ev.groups || []).join(', ');
+      const groups = Store.state.eventGroupsDrafts[eventId] ?? (ev.groups || []);
       const data = await this.run(`event-groups:${eventId}`, () => Api.post('updateEventGroup', { eventId, title: ev.title, groups }));
       if (data) {
         const drafts = { ...Store.state.eventGroupsDrafts };
@@ -1755,7 +1789,7 @@
     async updateMemberGroups(email) {
       const member = Store.state.members.find((m) => m.email === email);
       if (!member) return;
-      const groups = Store.state.memberGroupsDrafts[email] ?? (member.groups || []).join(', ');
+      const groups = Store.state.memberGroupsDrafts[email] ?? (member.groups || []);
       const data = await this.run(`member-groups:${email}`, () => Api.post('updateMemberGroups', { email, groups }));
       if (data) {
         const drafts = { ...Store.state.memberGroupsDrafts };
@@ -1792,12 +1826,26 @@
       const { email: input, role: roleSelect } = memberFormFields(form);
       const email = input.value.trim().toLowerCase();
       const role = roleSelect.value;
-      const groups = form.elements.groups.value.trim();
+      const groups = checkedGroups(form);
       if (email.length > 254 || !EMAIL_RE.test(email)) { Toast.show('Enter a valid email address.', 'error'); input.focus(); return; }
       if (!ROLES.includes(role)) { Toast.show('Choose a valid role.', 'error'); return; }
       if (Store.state.members.some((m) => m.email === email)) { Toast.show(`${email} is already a member.`, 'info'); return; }
       const data = await this.run('member:add', () => Api.post('addMember', { email, role, groups }), `${email} added as ${role}`);
-      if (data) { input.value = ''; form.elements.groups.value = ''; Store.set({ members: data.members }); }
+      if (data) { input.value = ''; form.querySelectorAll('input[name="groups"]').forEach((checkbox) => { checkbox.checked = false; }); Store.set({ members: data.members }); }
+    },
+
+    async addGroup(form) {
+      const input = form.querySelector('input[name="label"]');
+      const label = input.value.trim();
+      if (!label) { Toast.show('Enter a group label.', 'error'); input.focus(); return; }
+      const data = await this.run('group:add', () => Api.post('addGroup', { label }), `Group "${label}" added`);
+      if (data) { input.value = ''; Store.set({ groupCatalog: data.groupCatalog }); }
+    },
+
+    async archiveGroup(label) {
+      if (!window.confirm(`Archive "${label}"? Existing assignments stay in place, but it cannot be assigned again.`)) return;
+      const data = await this.run(`group:${label}`, () => Api.post('archiveGroup', { label }), `Group "${label}" archived`);
+      if (data) Store.set({ groupCatalog: data.groupCatalog });
     },
 
     async setRole(email, role) {
@@ -1860,7 +1908,7 @@
             ${field('Time', '<input name="time" type="time" class="input" />')}
           </div>
           ${field('Location name (shown to guests)', '<input name="location" maxlength="200" placeholder="Lawn, Hotel Leela" class="input" />')}
-          ${field('Audience groups (optional; blank means everyone)', '<input name="groups" list="group-label-options" maxlength="300" placeholder="Family, Bride side" class="input" />')}
+          ${field('Audience groups (optional; no selection means everyone)', groupPicker(Store.state.groupCatalog, [], 'add-event-groups'))}
           <div>
             ${field('Google Maps link (optional)', '<input name="mapLink" type="url" inputmode="url" maxlength="500" placeholder="https://maps.app.goo.gl/…" class="input" />')}
             <div class="mt-1.5 flex flex-wrap gap-2">
@@ -1898,7 +1946,7 @@
           const day = toDayLabel(v.day);
           if (!v.title || !day) { Toast.show('Please add a title and pick a day.', 'error'); return null; }
           if (v.mapLink && !isMapsUrl(v.mapLink)) { Toast.show('Paste a Google Maps link (https://maps.app.goo.gl/… or https://www.google.com/maps/…), or leave it blank.', 'error'); return null; }
-          return { title: v.title, day, time: to12h(v.time), location: v.location, mapLink: v.mapLink, groups: v.groups };
+          return { title: v.title, day, time: to12h(v.time), location: v.location, mapLink: v.mapLink, groups: checkedGroups(form) };
         },
         submit: async (payload, key) => {
           const data = await this.run(key, () => Api.post('addEvent', payload), `“${payload.title}” added 🪔`);
@@ -2058,6 +2106,7 @@
         case 'delete-event': void Actions.deleteEvent(id); break;
         case 'save-event-groups': void Actions.updateEventGroups(id); break;
         case 'save-member-groups': void Actions.updateMemberGroups(el.dataset.email); break;
+        case 'archive-group': void Actions.archiveGroup(el.dataset.label); break;
         case 'clear-notifications': void Actions.clearNotifications(); break;
         case 'add-pickup': Actions.openTravelForm(); break;
         case 'edit-pickup': Actions.openEditTravel(id); break;
@@ -2077,6 +2126,15 @@
     });
 
     view.addEventListener('change', (e) => {
+      const groupCheckbox = e.target.closest('input[type="checkbox"][data-action]');
+      if (groupCheckbox?.dataset.action === 'event-groups') {
+        Store.state.eventGroupsDrafts[groupCheckbox.dataset.id] = checkedGroups(groupCheckbox.closest('fieldset'));
+        return;
+      }
+      if (groupCheckbox?.dataset.action === 'member-groups') {
+        Store.state.memberGroupsDrafts[groupCheckbox.dataset.email] = checkedGroups(groupCheckbox.closest('fieldset'));
+        return;
+      }
       const roleSel = e.target.closest('select[data-action="set-role"]');
       if (roleSel) {
         const member = Store.state.members.find((m) => m.email === roleSel.dataset.email);
@@ -2098,15 +2156,14 @@
     view.addEventListener('input', (e) => {
       if (e.target.matches('[data-action="pickup-search"]')) Store.set({ pickupSearch: e.target.value });
       if (e.target.matches('[data-action="member-search"]')) Store.set({ memberSearch: e.target.value });
-      if (e.target.matches('[data-action="event-groups"]')) Store.state.eventGroupsDrafts[e.target.dataset.id] = e.target.value;
-      if (e.target.matches('[data-action="member-groups"]')) Store.state.memberGroupsDrafts[e.target.dataset.email] = e.target.value;
     });
 
     view.addEventListener('submit', (e) => {
-      const form = e.target.closest('form[data-action="add-member"]');
+      const form = e.target.closest('form[data-action]');
       if (!form) return;
       e.preventDefault();
-      void Actions.addMember(form);
+      if (form.dataset.action === 'add-member') void Actions.addMember(form);
+      if (form.dataset.action === 'add-group') void Actions.addGroup(form);
     });
 
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !Tour.active && !Welcome.open) Modal.close(); });
@@ -2116,7 +2173,7 @@
       if (Store.state.authStatus === 'authed' && !Auth.restoreOffline()) {
         Store.set({
           authStatus: 'offline', role: GUEST_ROLE, isAdmin: false, itinerary: [], logistics: [], members: [],
-          myTravel: [], notifications: [], groups: [], knownGroups: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {},
+          myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {},
         });
       }
     });

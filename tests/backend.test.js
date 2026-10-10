@@ -316,6 +316,37 @@ test('groups: create and archive labels with validation, admin authorization, an
   assert.equal(b.audit().length, auditCount);
 });
 
+test('group assignments accept registered labels only and allow current archived assignments to remain or be removed', () => {
+  const b = grouped();
+  b.sandbox.setup();
+  b.call(ADMIN, 'addGroup', { label: 'Family' });
+  b.call(ADMIN, 'addGroup', { label: 'Hosts' });
+  assert.deepEqual(b.call(ADMIN, 'session').data.groupCatalog, [
+    { label: 'Family', status: 'Active' }, { label: 'Hosts', status: 'Active' },
+  ]);
+  assert.equal(b.call(GUEST_A, 'session').data.groupCatalog, undefined, 'catalog is only included in admin sessions');
+
+  assert.equal(b.call(ADMIN, 'addMember', { email: 'unknown@example.com', groups: ['Unlisted'] }).code, 'BAD_REQUEST');
+  assert.equal(b.call(ADMIN, 'addEvent', { title: 'Private', day: 'Day 1', groups: ['Unlisted'] }).code, 'BAD_REQUEST');
+  assert.equal(b.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: ['Unlisted'] }).code, 'BAD_REQUEST');
+  assert.equal(b.call(ADMIN, 'updateEventGroup', { eventId: '1', groups: ['Unlisted'] }).code, 'BAD_REQUEST');
+  const created = b.call(ADMIN, 'addEvent', { title: 'Family event', day: 'Day 1', groups: ['fAMILY'] });
+  assert.equal(created.ok, true);
+  assert.deepEqual(created.data.itinerary.at(-1).groups, ['Family']);
+  const eventId = created.data.itinerary.at(-1).id;
+  b.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: ['family'] });
+  assert.deepEqual(b.call(ADMIN, 'session').data.members.find((member) => member.email === GUEST_A).groups, ['Family']);
+
+  b.call(ADMIN, 'archiveGroup', { label: 'Family' });
+  assert.deepEqual(b.call(ADMIN, 'session').data.groupCatalog[0], { label: 'Family', status: 'Archived' });
+  assert.equal(b.call(ADMIN, 'addMember', { email: 'archived@example.com', groups: ['Family'] }).code, 'BAD_REQUEST');
+  assert.equal(b.call(ADMIN, 'addEvent', { title: 'Archived event', day: 'Day 2', groups: ['Family'] }).code, 'BAD_REQUEST');
+  assert.equal(b.call(ADMIN, 'updateMemberGroups', { email: GUEST_B, groups: ['Family'] }).code, 'BAD_REQUEST');
+  assert.equal(b.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: ['Family'] }).ok, true);
+  assert.equal(b.call(ADMIN, 'updateEventGroup', { eventId, title: 'Family event', groups: ['Family'] }).ok, true);
+  assert.deepEqual(b.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: [] }).data.members.find((member) => member.email === GUEST_A).groups, []);
+});
+
 test('setup: existing data is preserved; missing columns appended; only blank cells backfilled', () => {
   const b = createBackend({
     members: [['admin@example.com', 'Admin', 'seed', ''], ['old@example.com', '', 'seed', '']],
@@ -574,9 +605,14 @@ const GUEST_B = 'b@example.com';
 const grouped = () => createBackend({
   members: [[ADMIN, 'Admin', 'seed', ''], [GUEST_A, 'Atithi', ADMIN, ''], [GUEST_B, 'Atithi', ADMIN, '']],
 });
+const registerGroups = (backend, labels) => {
+  backend.sandbox.setup();
+  labels.forEach((label) => backend.call(ADMIN, 'addGroup', { label }));
+};
 
 test('groups: labels are validated, de-duplicated case-insensitively, and audited', () => {
   const b = grouped();
+  registerGroups(b, ['Bride side', 'Family']);
   assert.equal(b.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: ['x'.repeat(31)] }).code, 'BAD_REQUEST');
   assert.equal(b.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: ['<b>'] }).code, 'BAD_REQUEST');
   assert.equal(b.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: [1] }).code, 'BAD_REQUEST');
@@ -595,6 +631,7 @@ test('groups: labels are validated, de-duplicated case-insensitively, and audite
 
 test('groups: prototype-like labels are preserved and never turn a private event public', () => {
   const b = grouped();
+  registerGroups(b, ['constructor', 'toString']);
   b.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: ['constructor', 'toString'] });
   b.call(ADMIN, 'updateEventGroup', { eventId: '1', groups: ['constructor'] });
   assert.deepEqual(b.call(GUEST_A, 'session').data.groups, ['constructor', 'toString']);
@@ -604,9 +641,10 @@ test('groups: prototype-like labels are preserved and never turn a private event
 
 test('groups: guests see ceremonies for everyone plus their groups; hosts see all', () => {
   const b = grouped();
+  registerGroups(b, ['Bride side', 'Groom side']);
   b.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: ['Bride side'] });
   assert.equal(b.call(ADMIN, 'addEvent', { title: 'Haldi', day: 'Day 1', groups: ['bride SIDE'] }).ok, true);
-  assert.match(b.audit().at(-1)[3], /for group bride SIDE/);
+  assert.match(b.audit().at(-1)[3], /for group Bride side/);
   b.call(ADMIN, 'updateEventGroup', { eventId: '1', title: 'Welcome Brunch', groups: ['Groom side'] });
   assert.match(b.audit().at(-1)[3], /audience of Event 1 .* from everyone to group Groom side/);
   assert.equal(b.call(ADMIN, 'updateEventGroup', { eventId: '1', title: 'Wrong', groups: [] }).code, 'CONFLICT');
@@ -622,6 +660,7 @@ test('groups: guests see ceremonies for everyone plus their groups; hosts see al
 
 test('addMember: optional groups are stored with the new member', () => {
   const b = createBackend();
+  registerGroups(b, ['Family']);
   const out = b.call(ADMIN, 'addMember', { email: 'new@example.com', role: 'Atithi', groups: 'Family' });
   assert.equal(out.ok, true);
   assert.deepEqual(out.data.members.find((m) => m.email === 'new@example.com').groups, ['Family']);
@@ -630,6 +669,7 @@ test('addMember: optional groups are stored with the new member', () => {
 
 test('push: everyone-events go to current member IDs; labelled events only to that group\'s opaque IDs', () => {
   const b = grouped();
+  registerGroups(b, ['Bride side']);
   b.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: ['Bride side'] });
   const pushIdA = b.call(GUEST_A, 'session').data.pushId;
   const pushIdB = b.call(GUEST_B, 'session').data.pushId;
@@ -648,11 +688,12 @@ test('push: everyone-events go to current member IDs; labelled events only to th
   body = JSON.parse(b.fetches.filter((f) => f.url.includes('onesignal')).at(-1).opts.payload);
   assert.equal(body.included_segments, undefined);
   assert.deepEqual(body.include_aliases, { external_id: [pushIdA] });
-  assert.match(b.audit().at(-1)[3], /push sent to group bride side/);
+  assert.match(b.audit().at(-1)[3], /push sent to group Bride side/);
 });
 
 test('push: a labelled event with nobody in the group is not sent but still logged', () => {
   const b = grouped();
+  registerGroups(b, ['Nobody']);
   b.call(ADMIN, 'updateEventGroup', { eventId: '1', groups: ['Nobody'] });
   const sent = b.fetches.length;
   const out = b.call(ADMIN, 'updateEvent', { eventId: '1', status: 'Live', notify: true });
@@ -664,6 +705,7 @@ test('push: a labelled event with nobody in the group is not sent but still logg
 
 test('notifications: Live announcements are logged, filtered by group, and Clear hides them per member', () => {
   const b = grouped();
+  registerGroups(b, ['Bride side']);
   assert.deepEqual(b.call(GUEST_A, 'session').data.notifications, [], 'missing tab = empty list');
   b.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: ['Bride side'] });
   b.call(ADMIN, 'updateEventGroup', { eventId: '1', groups: ['Bride side'] });

@@ -388,7 +388,7 @@ var ACTIONS_ = {
     var time = optionalString_(payload.time, 'time');
     var location = optionalString_(payload.location, 'location');
     var mapLink = optionalMapLink_(payload.mapLink);
-    var groups = requireGroups_(payload.groups);
+    var groups = resolveGroups_(payload.groups, []);
     if (mapLink || groups.length) ensureColumns_(SHEETS.ITINERARY, OPTIONAL_HEADERS.Itinerary);
 
     // New events always start as Upcoming; going Live (with push) is a separate, deliberate action.
@@ -425,7 +425,7 @@ var ACTIONS_ = {
   addMember: function (payload, user, req) {
     var email = requireEmail_(payload.email);
     var role = requireRole_(payload.role || ROLES.ATITHI);
-    var groups = requireGroups_(payload.groups);
+    var groups = resolveGroups_(payload.groups, []);
     if (getMember_(email)) throw new AppError('CONFLICT', email + ' is already a member.');
 
     if (groups.length) ensureColumns_(SHEETS.MEMBERS, OPTIONAL_HEADERS.Members);
@@ -446,6 +446,7 @@ var ACTIONS_ = {
     if (!row) throw new AppError('NOT_FOUND', email + ' is not a member.');
 
     var previous = parseGroups_(row.values.Groups);
+    groups = resolveGroups_(groups, previous);
     if (sameGroups_(previous, groups)) return { members: readMembers_() };
     setCell_(table, row, 'Groups', groups.join(', '));
     writeAudit_(user.email, AUDIT_CATEGORY.ADMIN, 'Changed groups of ' + email + ' from ' +
@@ -465,6 +466,7 @@ var ACTIONS_ = {
     assertSameEvent_(row, payload.title);
 
     var previous = parseGroups_(row.values.Group);
+    groups = resolveGroups_(groups, previous);
     if (!sameGroups_(previous, groups)) {
       setCell_(table, row, 'Group', groups.join(', '));
       writeAudit_(user.email, AUDIT_CATEGORY.EVENT, 'Changed audience of Event ' + eventId + ' ("' +
@@ -832,6 +834,21 @@ function requireGroups_(value) {
     }
   });
   return groups;
+}
+
+/** Resolves user selections to catalog spelling; archived labels can only be retained if already assigned. */
+function resolveGroups_(value, previous) {
+  var requested = requireGroups_(value);
+  var catalog = readGroupCatalog_();
+  var existing = (previous || []).map(function (label) { return label.toLowerCase(); });
+  return requested.map(function (label) {
+    var group = catalog.find(function (candidate) { return candidate.label.toLowerCase() === label.toLowerCase(); });
+    if (!group) throw new AppError('BAD_REQUEST', 'Choose a group from the active group list.');
+    if (group.status !== 'Active' && existing.indexOf(group.label.toLowerCase()) < 0) {
+      throw new AppError('BAD_REQUEST', 'Archived groups cannot be assigned to new members or ceremonies.');
+    }
+    return group.label;
+  });
 }
 
 function requireGroupLabel_(value) {

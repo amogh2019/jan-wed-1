@@ -11,7 +11,7 @@ A private, installable Progressive Web App (PWA) for a 3-day event. It is hosted
 | Everyone | Google sign-in is **required**. Only emails listed on the `Members` sheet can open the app. After signing in, guests see a **welcome screen** that opens with the Ganesh Vandana and greets them by name. It appears on every sign-in and every time the app is opened. |
 | First visit | A short **guided tour** highlights the main parts of the app. It runs **once per guest**: finishing or skipping it is saved to that guest's row in `Members` (`TourStatus`), so it never repeats, even on another device. Guests can replay it from their profile at any time. |
 | Atithi (guest) | A festive schedule grouped by day, with a progress bar, a "Happening now" card, an "Up next" card and map links for every venue. A gentle message appears when a new ceremony starts. **My travel** shows their own pick-up and drop (linked by their email on the `Logistics` sheet) with a one-tap call to the family contact. **Notifications** keeps recent announcements from Event Control; ceremonies tagged for a group are shown only to its members. There is also a **Notify me** button and a step-by-step guide to install the app to the home screen (shareable link: `<site>/?install=1`). |
-| Admin | **Event Control:** add ceremonies, choose audience groups, and set one Live; blank audience means everyone currently on the Members list. Pushes target only those members' registered devices, or tagged members for a group event, and WhatsApp opens with a ready-made message. **Pick & Drop:** add or edit a family's travel, and mark pick-ups (Picked Up) and departure drops (Dropped Off), sorted by time. **Members:** add/remove members, assign groups, and switch roles between Admin and Atithi. Admins see all ceremonies and announcement history. |
+| Admin | **Event Control:** add ceremonies, choose multiple audience groups, and set one Live; blank audience means everyone currently on the Members list. Pushes target only those members' registered devices, or tagged members for a group event, and WhatsApp opens with a ready-made message. **Pick & Drop:** add or edit a family's travel, and mark pick-ups (Picked Up) and departure drops (Dropped Off), sorted by time. **Members & access:** add/remove members, manage group labels, choose multiple member groups, and switch roles between Admin and Atithi. Archived labels keep existing assignments but cannot be assigned to new members or ceremonies. Admins see all ceremonies and announcement history. |
 
 Every admin action sends the admin's email and a timestamp. `Code.gs` writes them to the `AuditLog` sheet.
 
@@ -24,6 +24,7 @@ Every admin action sends the admin's email and a timestamp. `Code.gs` writes the
 | `Members` | Email, Role (`Admin`/`Atithi`), AddedBy, AddedDate, TourStatus (`Pending`/`Completed`/`Skipped`), TourCompletedAt, Groups (comma-separated labels), NotificationsClearedAt |
 | `AuditLog` | Timestamp, UserEmail, ActionCategory, Details |
 | `Notifications` | Timestamp, Title, Message, EventID, Groups, SentBy, PushStatus (one row per Live announcement sent from Event Control) |
+| `Groups` | Label, Status (`Active`/`Archived`; created by `setup()`) |
 
 Columns are matched by header name, so you can reorder them. An empty or unknown Role, or the old name `Viewer`, is treated as `Atithi`. Admins add itinerary and pick-up rows from the app, so they don't need access to the Sheet itself (the script runs as you).
 
@@ -32,7 +33,7 @@ Columns are matched by header name, so you can reorder them. An empty or unknown
 ### 1. Google Sheet + Apps Script
 1. Create a Google Sheet, then open **Extensions → Apps Script**.
 2. Paste in [`backend/Code.gs`](backend/Code.gs) and save.
-3. Run `setup()` once and grant the permissions it asks for. It creates all tabs, headers and dropdowns, and adds **you** to `Members` as the first Admin. If you already have an `Admins` tab, it moves those emails into `Members` as Admins. Running `setup()` again is safe: it only adds missing columns, such as `TourStatus`, to the right of existing sheets, and never touches your data.
+3. Run `setup()` and grant the permissions it asks for. It creates all tabs, headers and dropdowns, seeds the `Groups` catalog from any existing assignments, and adds **you** to `Members` as the first Admin. If you already have an `Admins` tab, it moves those emails into `Members` as Admins. Running `setup()` again is safe: it only adds missing columns, such as `TourStatus`, to the right of existing sheets, and never touches your data.
 4. Go to **Project Settings → Script properties** and add:
 
    | Property | Value |
