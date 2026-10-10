@@ -6,7 +6,7 @@ Everything needed to keep building this app. Read this before changing code.
 
 An **invite-only, festive PWA** for a 3-day event, hosted for free on GitHub Pages.
 
-- **Frontend:** static HTML/JS + Tailwind, installable ("Add to Home Screen"), works offline from cache.
+- **Frontend:** static HTML/JS + Tailwind, installable ("Add to Home Screen"), works offline from cache. Offline schedule data contains everyone-events as of the last sync and expires after 15 minutes. Audience changes made while a device is offline cannot be known until it reconnects.
 - **Backend:** one Google Sheet + Google Apps Script web app (`backend/Code.gs`).
 - **Login:** Google sign-in is **mandatory**. Only emails in the `Members` tab get in.
 - **Roles:** `Admin` (can change things) and `Atithi` (read-only guest; called `Viewer` before v1.4 — legacy `Viewer` cells and requests are still accepted as Atithi).
@@ -37,10 +37,11 @@ Tab names and required columns (exact header text; case/space differences are to
 
 | Tab | Required columns | Optional (added later) |
 |---|---|---|
-| `Itinerary` | EventID, Day, Time, Title, Location, Status (`Upcoming`/`Live`/`Completed`); optional MapLink (Google Maps link the location opens) | |
+| `Itinerary` | EventID, Day, Time, Title, Location, Status (`Upcoming`/`Live`/`Completed`) | MapLink (Google Maps link), Group (comma-separated audience labels; blank means everyone) |
 | `Logistics` | ID, Name, Members, Contact, ArrivalDateTime, DepartureDateTime, Mode, PickupStatus (`Pending`/`Picked Up`) | Email (guest's Google email → their "My travel" tab), DropStatus (`Pending`/`Dropped Off`, backfilled `Pending`) |
-| `Members` | Email, Role (`Admin`/`Atithi`; legacy `Viewer` = Atithi), AddedBy, AddedDate | TourStatus (`Pending`/`Completed`/`Skipped`), TourCompletedAt |
+| `Members` | Email, Role (`Admin`/`Atithi`; legacy `Viewer` = Atithi), AddedBy, AddedDate | TourStatus (`Pending`/`Completed`/`Skipped`), TourCompletedAt, Groups (comma-separated labels), NotificationsClearedAt |
 | `AuditLog` | Timestamp, UserEmail, ActionCategory, Details | |
+| `Notifications` | Timestamp, Title, Message, EventID, Groups, SentBy, PushStatus (created by `setup()`; one row per app announcement) | |
 
 - Required columns: defined in `HEADERS` in Code.gs. Optional: `OPTIONAL_HEADERS`. Defaults for blanks: `BACKFILL`.
 - The legacy `Admins` tab (from v1) is migrated into `Members` by `setup()` **only if Members is empty**.
@@ -69,21 +70,26 @@ Every request: body size cap → local ID-token precheck → Google tokeninfo ve
 
 | Action | Who | What | Audit category |
 |---|---|---|---|
-| `session` | any member | Returns user, role, tourStatus, itinerary, `myTravel` (only rows whose Email is the caller, without the Email field), `familyContact` (+ full logistics, members for admins). A guest's session still loads if Logistics is missing. | — |
-| `updateEvent` | Admin | Set event status; `Live` triggers OneSignal push. | Event |
+| `session` | any member | Returns user, role, tourStatus, member groups, filtered itinerary and recent notifications, opaque `pushId`, `myTravel` (only rows whose Email is the caller, without the Email field), `familyContact` (+ full logistics, members and known groups for admins). A guest's session still loads if Logistics is missing. | — |
+| `updateEvent` | Admin | Set event status; `Live` triggers OneSignal push to all current Members when Group is blank, or to matching group members only. It does not target unrelated/stale OneSignal subscriptions. Each announcement is logged in `Notifications` even if push fails. | Event |
 | `updatePickup` | Admin | Set PickupStatus. | Logistics |
 | `updateDropoff` | Admin | Set DropStatus (`Pending`/`Dropped Off`); adds the column on first use. | Logistics |
 | `updateLogistics` | Admin | Edit a travel row (`id`, `name` required). **Only keys present in the payload are written**, so free-text times the form can't show are never wiped; statuses untouched. Returns `changed`; no-op edits aren't audited. | Logistics |
-| `addEvent` | Admin | Append an itinerary row: `title`, `day` required (the app sends the date picker's value as "Sat, Jan 23"); `time`, `location`, `mapLink` optional. `mapLink` must be an https Google Maps link (allow-listed on both server and client, since it becomes an href); the MapLink column is appended only the first time one is used. Always starts `Upcoming` (no push). Next EventID = highest number + 1. Written in the sheet's own column order. | Event |
+| `addEvent` | Admin | Append an itinerary row: `title`, `day` required (the app sends the date picker's value as "Sat, Jan 23"); `time`, `location`, `mapLink`, and comma-separated `groups` optional. `mapLink` must be an https Google Maps link (allow-listed on both server and client, since it becomes an href). Always starts `Upcoming` (no push). Next EventID = highest number + 1. Written in the sheet's own column order. | Event |
+| `updateEventGroup` | Admin | Set a ceremony's audience with comma-separated `groups`; blank means everyone. Stale titles are rejected. | Event |
 | `deleteEvent` | Admin | Delete an itinerary row: `eventId` required, `title` optional but sent by the app (must match, else `CONFLICT`, so a stale screen can't delete a renumbered event). Numeric IDs of rows **below** shift down by one (deleting 3: 4→3, 5→4) so the next `addEvent` continues the sequence. If a shift would collide with an ID that stays (hand-edited, out-of-order sheet), the row is deleted and no IDs change. Older AuditLog lines keep the old IDs, and the deletion audit line lists every `from→to`. | Event |
 | `addPickup` | Admin | Append a Logistics row: `name` required; `members` (1–500), `contact` (phone chars), `arrival`/`departure` (`yyyy-MM-ddTHH:mm`, sheet time zone, departure ≥ arrival), `mode`, `email`, `pickupStatus` optional. Next ID keeps the prefix (`G7` → `G8`). | Logistics |
-| `addMember` | Admin | Add email with role (`Admin`/`Atithi`; `Viewer` accepted and stored as `Atithi`). | Admin Management |
+| `addMember` | Admin | Add email with role (`Admin`/`Atithi`; `Viewer` accepted and stored as `Atithi`) and optional comma-separated `groups`. | Admin Management |
+| `updateMemberGroups` | Admin | Replace a member's group labels. Labels are case-insensitive for matching; up to 10 labels, 30 characters each. | Admin Management |
 | `updateMemberRole` | Admin | Change role (can't change own; can't remove last admin). | Admin Management |
 | `removeMember` | Admin | Remove (can't remove self or last admin). | Admin Management |
 | `addAdmin` / `removeAdmin` | Admin | Back-compat aliases. | Admin Management |
 | `completeTour` | any member | `status: Completed/Skipped`; only the caller's own row; recorded once. | Onboarding |
+| `clearNotifications` | any member | Set the caller's `NotificationsClearedAt` timestamp, hiding existing notices for that member across devices without deleting shared history. | — |
 
 **Family contact for guests.** Set Script Properties `FAMILY_CONTACT_NAME` and `FAMILY_CONTACT_PHONE` (e.g. `+91 98765 43210`) to show a "Plans changed? Call …" button on every guest's My travel tab. Kept out of the repo on purpose; unset → the button is hidden.
+
+**Groups and announcement history.** Group names are comma-separated, case-insensitive for matching, and cannot contain commas; blank event groups mean everyone currently on the `Members` list. Guests receive only events/notices for everyone or groups assigned to them; admins can see all. Pushes target current member devices using an HMAC-derived opaque external ID, not email addresses, so removed members' stale subscriptions are excluded. `setup()` creates the `PUSH_ID_SECRET` Script Property; never copy it into the frontend or repository. Each device must open the updated app once while signed in before targeted pushes can reach it. The `Notifications` tab records announcements initiated by Event Control, including push failures; messages sent directly in the OneSignal dashboard and delivery receipts cannot be captured here. Clear is per member/device-synced and does not delete the shared notification rows. Session history shows up to 50 newest announcements (reading up to the latest 100 from the sheet).
 
 **Admins don't need access to the Sheet.** The web app runs *Execute as: Me*, so every read/write happens as the script owner after the checks above. Only organisers who want to look at the raw data need the Sheet shared with them.
 
@@ -98,14 +104,14 @@ Mutations run under a script lock, re-check the admin role inside the lock, and 
 - `Store`: state plus localStorage cache (no tokens ever stored there; the ID token lives in sessionStorage only).
 - `Auth`: GIS sign-in, gate screen, "Access not granted" screen, sign-out.
 - `Api`: POST with timeout, retries and error mapping.
-- `Push`: OneSignal init and the "Turn on Notifications" banner.
+- `Push`: OneSignal init, the "Turn on Notifications" banner, and `OneSignal.login()` with the backend-issued opaque member ID for group-targeted delivery.
 - `WhatsApp`: builds the `*bold*` broadcast message and the `api.whatsapp.com/send` URL.
 - `Install`: native install prompt where the browser offers one, otherwise a step-by-step guide (iOS Safari, Android Chrome, desktop, and in-app browsers like WhatsApp which must "Open in browser" first). Available from the 📲 banner and the profile menu. **Shareable install link:** `<site>/?install=1` (admins: profile → "Copy the install link for guests") opens the guide even if the banner was dismissed; the query is then stripped from the URL. Browsers only allow the native prompt after a tap, so the link opens the guide rather than installing silently. The installed app's name comes from `EVENT_NAME` (or `APP_SHORT_NAME` if set) in `config.js`. Phones read it from `manifest.json` and the `apple-mobile-web-app-title` meta *before* any JS runs, so after changing it run `npm run sync:config` (copies it into both files and `<title>`; `npm test` fails if they drift), then bump `CACHE_VERSION`. Already-installed apps keep their old name until reinstalled (Android may update it on its own after a few days).
 - `Toast`, `Modal`, `Festive` (petal shower): UI helpers.
 - **Welcome**: Ganesh Vandana splash (ॐ, ॥ श्री गणेशाय नमः ॥, the Vakratunda shloka with its meaning, then "स्वागतम्, <name> ji" with falling petals). Shown on every sign-in and every time the app is opened/reloaded (not on background syncs); tap/Esc to skip; respects `prefers-reduced-motion`.
 - **Tour**: spotlight tour of the guest tabs. Starts only when `tourStatus` is `Pending`/blank. Skip or finish → `completeTour` saved to the Members sheet, so it never auto-plays again on any device. It can be replayed from the profile menu; a replay is not re-recorded.
 - **Nudges**: when an event newly turns Live during a session, a warm toast ("🪔 … has begun — please join us!") appears with a petal shower. Together with the notifications banner, the install prompt and the Maps links, these are the guest nudges.
-- `Views` / `ScheduleParts`: the screens — Schedule; guest **My travel** (own pick-up & drop + family contact); admin **Pick & Drop** (one list with a Pick-ups/Drops toggle, sorted by arrival or departure time, per-row ✎ edit) and Members; Profile modal. Bottom nav: admins 4 tabs, guests Schedule + My travel. `Data` handles sync (polls every `REFRESH_INTERVAL_MS` ±20% jitter, minimum 15 s, only while visible and online); `Actions` handles admin mutations.
+- `Views` / `ScheduleParts`: the screens — Schedule; guest **My travel** (own pick-up & drop + family contact); **Notifications** for all members; admin **Pick & Drop** (one list with a Pick-ups/Drops toggle, sorted by arrival or departure time, per-row ✎ edit), Event Control and Members. Bottom nav includes Notifications for both roles. `Data` handles sync (polls every `REFRESH_INTERVAL_MS` ±20% jitter, minimum 15 s, only while visible and online); `Actions` handles admin mutations.
 - **Header title**: the full `EVENT_NAME` is shown; if it is wider than the header it glides left and back (`.marquee`, shift set via CSSOM). With reduced motion it wraps instead.
 
 Event wording: `EVENT_NAME`, `EVENT_DATES`, `EVENT_BLESSING` and `EVENT_HOSTS` in `config.js`.
@@ -184,6 +190,7 @@ Do these in order (each step is reversible until the last):
 
 ## 11. Changelog
 
+- **v1.7.0** Group audiences and announcement history: optional `Itinerary.Group` and `Members.Groups` labels filter guest schedules; blank event group means all current Members. `Notifications` logs Event Control Live announcements and provides per-member clearing across devices. OneSignal targeting uses HMAC-derived opaque external IDs (`PUSH_ID_SECRET` is created by `setup()`), excluding removed-member subscriptions; devices must open the updated app once before targeted pushes can reach them. Offline cache excludes group-restricted events as of its last sync and expires after 15 minutes; group changes made while offline cannot be learned until the device reconnects. Added admin group controls, a shared Notifications tab, and tests/docs. Dashboard-originated OneSignal sends and delivery receipts are not captured.
 - **v1.0** Itinerary, Logistics, Admins, AuditLog; GIS login; OneSignal; WhatsApp broadcast.
 - **v1.1** Mandatory login; `Members` tab with Admin/Viewer roles; Members management tab; hardened backend (token verify, rate limit, locks, injection guard).
 - **v1.2** Festive Hindu celebration theme and professional UX pass.

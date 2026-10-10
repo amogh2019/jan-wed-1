@@ -10,8 +10,8 @@ A private, installable Progressive Web App (PWA) for a 3-day event. It is hosted
 |---|---|
 | Everyone | Google sign-in is **required**. Only emails listed on the `Members` sheet can open the app. After signing in, guests see a **welcome screen** that opens with the Ganesh Vandana and greets them by name. It appears on every sign-in and every time the app is opened. |
 | First visit | A short **guided tour** highlights the main parts of the app. It runs **once per guest**: finishing or skipping it is saved to that guest's row in `Members` (`TourStatus`), so it never repeats, even on another device. Guests can replay it from their profile at any time. |
-| Atithi (guest) | A festive schedule grouped by day, with a progress bar, a "Happening now" card, an "Up next" card and map links for every venue. A gentle message appears when a new ceremony starts. **My travel** shows their own pick-up and drop (linked by their email on the `Logistics` sheet) with a one-tap call to the family contact. There is also a **Notify me** button and a step-by-step guide to install the app to the home screen (shareable link: `<site>/?install=1`). |
-| Admin | **Event Control:** add ceremonies and set one Live, which sends a push to every subscriber and opens WhatsApp with a ready-made message. **Pick & Drop:** add or edit a family's travel, and mark pick-ups (Picked Up) and departure drops (Dropped Off), sorted by time. **Members:** add/remove members and switch their role between Admin and Atithi. |
+| Atithi (guest) | A festive schedule grouped by day, with a progress bar, a "Happening now" card, an "Up next" card and map links for every venue. A gentle message appears when a new ceremony starts. **My travel** shows their own pick-up and drop (linked by their email on the `Logistics` sheet) with a one-tap call to the family contact. **Notifications** keeps recent announcements from Event Control; ceremonies tagged for a group are shown only to its members. There is also a **Notify me** button and a step-by-step guide to install the app to the home screen (shareable link: `<site>/?install=1`). |
+| Admin | **Event Control:** add ceremonies, choose audience groups, and set one Live; blank audience means everyone currently on the Members list. Pushes target only those members' registered devices, or tagged members for a group event, and WhatsApp opens with a ready-made message. **Pick & Drop:** add or edit a family's travel, and mark pick-ups (Picked Up) and departure drops (Dropped Off), sorted by time. **Members:** add/remove members, assign groups, and switch roles between Admin and Atithi. Admins see all ceremonies and announcement history. |
 
 Every admin action sends the admin's email and a timestamp. `Code.gs` writes them to the `AuditLog` sheet.
 
@@ -19,10 +19,11 @@ Every admin action sends the admin's email and a timestamp. `Code.gs` writes the
 
 | Tab | Columns |
 |---|---|
-| `Itinerary` | EventID, Day, Time, Title, Location, Status (`Upcoming`/`Live`/`Completed`); optional MapLink (Google Maps link the location opens) |
+| `Itinerary` | EventID, Day, Time, Title, Location, Status (`Upcoming`/`Live`/`Completed`); optional MapLink (Google Maps link the location opens), Group (comma-separated audience labels; blank means everyone) |
 | `Logistics` | ID, Name, Members, Contact, ArrivalDateTime, DepartureDateTime, Mode, PickupStatus (`Pending`/`Picked Up`), Email (optional, the guest's Google email), DropStatus (optional, `Pending`/`Dropped Off`) |
-| `Members` | Email, Role (`Admin`/`Atithi`), AddedBy, AddedDate, TourStatus (`Pending`/`Completed`/`Skipped`), TourCompletedAt |
+| `Members` | Email, Role (`Admin`/`Atithi`), AddedBy, AddedDate, TourStatus (`Pending`/`Completed`/`Skipped`), TourCompletedAt, Groups (comma-separated labels), NotificationsClearedAt |
 | `AuditLog` | Timestamp, UserEmail, ActionCategory, Details |
+| `Notifications` | Timestamp, Title, Message, EventID, Groups, SentBy, PushStatus (one row per Live announcement sent from Event Control) |
 
 Columns are matched by header name, so you can reorder them. An empty or unknown Role, or the old name `Viewer`, is treated as `Atithi`. Admins add itinerary and pick-up rows from the app, so they don't need access to the Sheet itself (the script runs as you).
 
@@ -41,6 +42,8 @@ Columns are matched by header name, so you can reorder them. An empty or unknown
    | `ONESIGNAL_REST_API_KEY` | OneSignal REST API key. This is secret and lives here only. |
    | `FAMILY_CONTACT_NAME` / `FAMILY_CONTACT_PHONE` | Optional. Shown to guests on **My travel** as "Plans changed? Call …". |
    | `APP_URL` | `https://<user>.github.io/<repo>/` |
+
+   `setup()` creates the private `PUSH_ID_SECRET` Script Property automatically. Do not share or commit it; it lets the backend generate opaque OneSignal IDs for group-only push targeting.
 5. Go to **Deploy → New deployment → Web app**. Set *Execute as* to **Me** and *Who has access* to **Anyone**. Copy the `/exec` URL.
    After any change to the code, use **Manage deployments → Edit → New version**. This keeps the same URL.
 
@@ -52,7 +55,7 @@ Under **Authorized JavaScript origins**, add `https://<user>.github.io` and `htt
 Create a **Web** app and choose **Custom Code** (not *Typical Site*). Set the Site URL to `https://<user>.github.io` (the origin only, no path).
 With *Typical Site*, OneSignal ignores the service-worker path in `app.js` and looks for `/OneSignalSDKWorker.js` at the domain root, which GitHub Pages project sites don't have. No device can subscribe, and `testPush()` returns "All included players are not subscribed".
 You do **not** need to upload OneSignal's service-worker file: [`service-worker.js`](service-worker.js) already imports it.
-Optionally, run `testPush()` in Apps Script to check delivery.
+Optionally, run `testPush()` in Apps Script to check delivery. For targeted notifications, each member's device must open the updated app once while signed in. The app associates that device with an opaque OneSignal external ID; no email address is sent as the OneSignal ID. Blank event groups target all current Members (not every OneSignal subscription), so removed members do not receive later notices. Members without a subscribed device can still read the announcement in Notifications after their next sync.
 
 ### 4. Frontend
 Fill in [`config.js`](config.js) with `APPS_SCRIPT_URL`, `GOOGLE_CLIENT_ID` and `ONESIGNAL_APP_ID`. None of these are secrets. You can also personalise `EVENT_NAME`, `EVENT_DATES`, `EVENT_BLESSING` and `EVENT_HOSTS`, which are shown on the invitation and welcome screens. `EVENT_NAME` (or `APP_SHORT_NAME`) is also the installed app's name: after changing it run `npm run sync:config`. `APPS_SCRIPT_URL` must be exactly `https://script.google.com/macros/s/<id>/exec`; any other URL is rejected. Then push to GitHub and enable **Settings → Pages → Deploy from branch (`main`, `/root`)**, and tick **Enforce HTTPS**.
@@ -82,7 +85,7 @@ npm run test:e2e    # browser smoke test: mocked Google/OneSignal/backend (first
 3. Membership is checked again on every request. Removing someone or demoting them takes effect on their next sync.
 4. Safety checks: you can't remove yourself or change your own role, and at least one Admin must always remain.
 5. Atithis never receive other guests' Logistics data (contact details) or the member list.
-6. When offline, a member who was verified before sees the last schedule they synced, read-only. Signing out clears the cached data.
+6. When offline, a previously verified member can see a read-only cache of ceremonies that were for everyone at the last sync. It expires after 15 minutes; audience changes made while a device is offline cannot be known until it reconnects. Signing out clears the cache.
 
 ## Security model
 

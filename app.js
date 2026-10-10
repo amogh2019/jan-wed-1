@@ -15,6 +15,7 @@
   const CONFIG = window.APP_CONFIG || {};
   const BASE_PATH = location.pathname.slice(0, location.pathname.lastIndexOf('/') + 1); // e.g. "/jan-wed-1/"
   const PUSH_INIT_TIMEOUT_MS = 15000;
+  const OFFLINE_CACHE_MAX_AGE_MS = 15 * 60 * 1000;
   // The ID token is a bearer credential: keep it in sessionStorage (tab-scoped, gone on close).
   // GIS auto-select silently re-issues one on the next launch.
   const STORAGE = { CREDENTIAL: 'evt.credential', LAST_USER: 'evt.lastUser', DATA_CACHE: 'evt.data', INSTALL_DISMISSED: 'evt.installDismissed' };
@@ -36,6 +37,8 @@
 
   /** Only Google-hosted avatars are rendered; anything else is dropped. */
   const safePicture = (url) => (/^https:\/\/lh[3-6]\.googleusercontent\.com\//i.test(String(url || '')) ? String(url) : '');
+  const offlineSchedule = (itinerary) => (Array.isArray(itinerary) ? itinerary : [])
+    .filter((event) => !Array.isArray(event.groups) || event.groups.length === 0);
 
   const formatDateTime = (value) => {
     if (!value) return '—';
@@ -73,6 +76,15 @@
   });
   const storage = makeStorage('localStorage');
   const sessionStore = makeStorage('sessionStorage');
+  const persistOfflineSchedule = (email, role, itinerary, savedAt = new Date().toISOString()) => {
+    storage.set(STORAGE.DATA_CACHE, {
+      email,
+      role,
+      itinerary: offlineSchedule(itinerary),
+      savedAt,
+      groupSafe: true,
+    });
+  };
 
   const isIos = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
@@ -95,6 +107,12 @@
       logistics: [],
       members: [],
       myTravel: [],        // the signed-in guest's own pick-up / drop rows
+      notifications: [],
+      groups: [],
+      knownGroups: [],
+      pushId: '',
+      eventGroupsDrafts: {},
+      memberGroupsDrafts: {},
       familyContact: null, // { name, phone } from Script Properties, if set
       user: null,          // { email, name, picture, idToken, exp }
       // 'checking' | 'signed-out' | 'denied' | 'authed' | 'offline' (cached read-only)
@@ -189,6 +207,22 @@
   const Auth = {
     epoch: 0, // bumped whenever the signed-in identity ends/changes; stale responses are dropped
     renewTimer: null,
+    offlineExpiryTimer: null,
+
+    clearOfflineExpiry() {
+      clearTimeout(this.offlineExpiryTimer);
+      this.offlineExpiryTimer = null;
+    },
+
+    scheduleOfflineExpiry(savedAt) {
+      this.clearOfflineExpiry();
+      const remaining = OFFLINE_CACHE_MAX_AGE_MS - (Date.now() - savedAt);
+      this.offlineExpiryTimer = setTimeout(() => {
+        if (navigator.onLine || Store.state.authStatus !== 'offline') return;
+        storage.remove(STORAGE.DATA_CACHE);
+        Store.set({ itinerary: [], lastSynced: null });
+      }, Math.max(remaining, 0));
+    },
 
     isExpired(user) { return !user?.exp || user.exp * 1000 < Date.now() + 30000; },
 
@@ -233,12 +267,20 @@
     restoreOffline() {
       const last = storage.get(STORAGE.LAST_USER);
       const cache = storage.get(STORAGE.DATA_CACHE);
-      if (!last?.email || !Array.isArray(cache?.itinerary) || cache.email !== last.email) return false;
+      const savedAt = Date.parse(cache?.savedAt || '');
+      const age = Date.now() - savedAt;
+      if (!last?.email || !Array.isArray(cache?.itinerary) || cache.email !== last.email || cache.groupSafe !== true
+        || !Number.isFinite(savedAt) || age < 0 || age > OFFLINE_CACHE_MAX_AGE_MS) {
+        storage.remove(STORAGE.DATA_CACHE);
+        return false;
+      }
       Store.set({
         user: { email: last.email, name: last.name || last.email, picture: safePicture(last.picture) },
-        authStatus: 'offline', role: normalizeRole(cache.role), isAdmin: false, logistics: [], members: [],
-        itinerary: cache.itinerary, lastSynced: cache.savedAt,
+        authStatus: 'offline', role: GUEST_ROLE, isAdmin: false, logistics: [], members: [], myTravel: [],
+        itinerary: cache.itinerary, notifications: [], groups: [], knownGroups: [], pushId: '',
+        eventGroupsDrafts: {}, memberGroupsDrafts: {}, lastSynced: cache.savedAt,
       });
+      this.scheduleOfflineExpiry(savedAt);
       return true;
     },
 
@@ -295,6 +337,7 @@
     },
 
     applySession(data, announce) {
+      this.clearOfflineExpiry();
       const savedAt = new Date().toISOString();
       const isAdmin = data.isAdmin === true && data.role === 'Admin';
       const user = {
@@ -303,7 +346,7 @@
         picture: safePicture(data.picture) || Store.state.user.picture,
       };
       // Persist only what offline mode needs: the schedule and a token-free identity.
-      storage.set(STORAGE.DATA_CACHE, { email: user.email, role: isAdmin ? 'Admin' : GUEST_ROLE, itinerary: data.itinerary, savedAt });
+      persistOfflineSchedule(user.email, isAdmin ? 'Admin' : GUEST_ROLE, data.itinerary, savedAt);
       storage.set(STORAGE.LAST_USER, { email: user.email, name: user.name, picture: user.picture });
       Store.set({
         authStatus: 'authed',
@@ -317,8 +360,15 @@
         lastSynced: savedAt,
         error: null,
         tourStatus: ['Pending', 'Completed', 'Skipped'].includes(data.tourStatus) ? data.tourStatus : 'Completed',
+        notifications: Array.isArray(data.notifications) ? data.notifications : [],
+        groups: Array.isArray(data.groups) ? data.groups : [],
+        knownGroups: Array.isArray(data.knownGroups) ? data.knownGroups : [],
+        pushId: typeof data.pushId === 'string' ? data.pushId : '',
+        eventGroupsDrafts: {},
+        memberGroupsDrafts: {},
         user,
       });
+      void Push.identify(data.pushId);
       Nudges.onSync();
       if (announce) Welcome.show(user, { isAdmin, onClose: () => Tour.maybeStart() });
       else Tour.maybeStart();
@@ -334,14 +384,16 @@
     },
 
     clearSession(patch) {
+      this.clearOfflineExpiry();
       this.epoch += 1;
+      void Push.logout();
       Tour.cancel();
       Nudges.reset();
       sessionStore.remove(STORAGE.CREDENTIAL);
       storage.remove(STORAGE.CREDENTIAL);
       storage.remove(STORAGE.LAST_USER);
       storage.remove(STORAGE.DATA_CACHE);
-      Store.set({ user: null, role: null, isAdmin: false, loading: false, itinerary: [], logistics: [], members: [], myTravel: [], familyContact: null, tab: 'schedule', lastSynced: null, ...patch });
+      Store.set({ user: null, role: null, isAdmin: false, loading: false, itinerary: [], logistics: [], members: [], myTravel: [], notifications: [], groups: [], knownGroups: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, familyContact: null, tab: 'schedule', lastSynced: null, ...patch });
     },
 
     deny(email) {
@@ -351,10 +403,12 @@
     },
 
     handleExpired() {
+      this.clearOfflineExpiry();
       this.epoch += 1;
+      void Push.logout();
       sessionStore.remove(STORAGE.CREDENTIAL);
       // Admin-only data must not linger on screen after the session ends.
-      Store.set({ authStatus: 'signed-out', user: null, isAdmin: false, role: null, logistics: [], members: [], myTravel: [], loading: false, tab: 'schedule' });
+      Store.set({ authStatus: 'signed-out', user: null, isAdmin: false, role: null, logistics: [], members: [], myTravel: [], notifications: [], groups: [], knownGroups: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, loading: false, tab: 'schedule' });
       Modal.close();
       Tour.cancel();
       this.prompt();
@@ -382,6 +436,9 @@
   const Push = {
     sdk: null,
     failed: false,
+    pendingIdentity: '',
+    loggedInIdentity: '',
+    identityOperation: Promise.resolve(),
     supported: 'Notification' in window && 'serviceWorker' in navigator && 'PushManager' in window,
 
     init() {
@@ -401,6 +458,8 @@
           this.sdk = OneSignal;
           OneSignal.Notifications.addEventListener('permissionChange', () => this.render());
           OneSignal.User.PushSubscription.addEventListener('change', () => this.render());
+          if (Store.state.pushId) void this.identify(Store.state.pushId);
+          else void this.logout();
         } catch (err) {
           console.warn('OneSignal init failed', err);
           this.failed = true;
@@ -408,6 +467,38 @@
         this.render();
       });
       this.render();
+    },
+
+    identify(externalId) {
+      if (typeof externalId !== 'string' || !/^m_[a-f0-9]{40}$/.test(externalId)) return Promise.resolve();
+      this.pendingIdentity = externalId;
+      if (!this.sdk) return Promise.resolve();
+      const sdk = this.sdk;
+      this.identityOperation = this.identityOperation.catch((err) => {
+        console.warn('OneSignal identity setup failed', err);
+      }).then(async () => {
+        if (this.pendingIdentity !== externalId || this.loggedInIdentity === externalId) return;
+        await sdk.login(externalId);
+        if (this.pendingIdentity === externalId) this.loggedInIdentity = externalId;
+      }).catch((err) => {
+        console.warn('OneSignal identity setup failed', err);
+      });
+      return this.identityOperation;
+    },
+
+    logout() {
+      this.pendingIdentity = '';
+      if (!this.sdk) return Promise.resolve();
+      const sdk = this.sdk;
+      this.identityOperation = this.identityOperation.catch((err) => {
+        console.warn('OneSignal identity setup failed', err);
+      }).then(async () => {
+        await sdk.logout();
+        this.loggedInIdentity = '';
+      }).catch((err) => {
+        console.warn('OneSignal identity sign-out failed', err);
+      });
+      return this.identityOperation;
     },
 
     status() {
@@ -1135,7 +1226,7 @@
               <p class="relative text-sm text-ink-600">This celebration app is private to invited guests. Please sign in with the Google account you shared with the hosts.</p>`}
             <div id="gsi-gate" class="relative mt-6 min-h-[44px] flex justify-center"></div>
             ${!s.online ? '<p class="relative mt-4 text-xs text-marigold-800">You’re offline — please connect to the internet to sign in.</p>' : ''}
-            <p class="relative mt-6 text-[11px] text-ink-400">We only use your Google name and email photo to confirm access on this app.</p>
+            <p class="relative mt-6 text-[11px] text-ink-400">We only use your Google name and email to confirm access on this app.</p>
           </article>
         </div>`;
     },
@@ -1145,12 +1236,14 @@
     <button data-action="${action}" class="btn btn-primary w-full mb-4">＋ ${label}</button>`;
 
   Views.control = (s) => {
-    const header = pageHeader('Host console', 'Event Control', '<b>Set Live &amp; Broadcast</b> updates the sheet, notifies every subscribed guest and opens WhatsApp with a ready-to-send message.');
+    const header = pageHeader('Host console', 'Event Control', '<b>Set Live &amp; Broadcast</b> updates the sheet, notifies the intended audience and opens WhatsApp with a ready-to-send message.');
+    const groupOptions = `<datalist id="group-label-options">${s.knownGroups.map((g) => `<option value="${escapeHtml(g)}"></option>`).join('')}</datalist>`;
     if (!s.itinerary.length) {
-      return `${header}${addButton('add-event', 'Add a ceremony')}${emptyState('🎛️', 'No ceremonies yet', 'Add the first ceremony of the celebration above.')}`;
+      return `${header}${groupOptions}${addButton('add-event', 'Add a ceremony')}${emptyState('🎛️', 'No ceremonies yet', 'Add the first ceremony of the celebration above.')}`;
     }
     return `
       ${header}
+      ${groupOptions}
       ${addButton('add-event', 'Add a ceremony')}
       <div class="space-y-3">
         ${s.itinerary.map((e) => {
@@ -1163,6 +1256,7 @@
                 <p class="text-[11px] font-semibold text-ink-400">#${escapeHtml(e.id)} · ${escapeHtml(e.day)} · ${escapeHtml(e.time)}</p>
                 <h4 class="font-semibold text-ink-900 truncate">${escapeHtml(e.title)}</h4>
                 <p class="text-sm text-ink-500 truncate inline-flex items-center gap-1">${pin}${escapeHtml(e.location || 'TBA')}</p>
+                <p class="text-[11px] text-ink-500 mt-1">Audience: <b>${escapeHtml((e.groups || []).join(', ') || 'Everyone')}</b></p>
               </div>
               ${badge(e.status)}
             </div>
@@ -1176,6 +1270,12 @@
               </select>
               <button data-action="delete-event" data-id="${escapeHtml(e.id)}" ${busy ? 'disabled' : ''} aria-label="Delete ${escapeHtml(e.title)}"
                 class="btn btn-ghost btn-sm col-span-2 min-h-[44px] text-kumkum-700">🗑 Delete ceremony</button>
+              <label class="col-span-2 block text-xs font-semibold text-ink-500">Audience groups (blank = everyone)
+                <span class="mt-1 flex gap-2">
+                  <input data-action="event-groups" data-id="${escapeHtml(e.id)}" list="group-label-options" value="${escapeHtml(s.eventGroupsDrafts[e.id] ?? (e.groups || []).join(', '))}" placeholder="Family, Bride side" class="input py-2 text-sm font-normal" aria-label="Audience groups for ${escapeHtml(e.title)}" />
+                  <button data-action="save-event-groups" data-id="${escapeHtml(e.id)}" class="btn btn-ghost btn-sm shrink-0">Save</button>
+                </span>
+              </label>
             </div>
           </article>`;
         }).join('')}
@@ -1315,7 +1415,7 @@
   Views.members = (s) => {
     const me = s.user?.email;
     const q = s.memberSearch.trim().toLowerCase();
-    const list = s.members.filter((m) => !q || m.email.includes(q) || m.role.toLowerCase() === q);
+    const list = s.members.filter((m) => !q || m.email.includes(q) || m.role.toLowerCase() === q || (m.groups || []).some((g) => g.toLowerCase().includes(q)));
     const adminCount = s.members.filter((m) => m.role === 'Admin').length;
     const roleOptions = (current) => ROLES.map((r) => `<option value="${r}" ${r === current ? 'selected' : ''}>${r}</option>`).join('');
     const stat = (n, label) => `<div class="card py-2"><p class="font-display text-xl text-kumkum-700">${n}</p><p class="text-[11px] text-ink-500">${label}</p></div>`;
@@ -1340,6 +1440,10 @@
             <div class="flex-1 min-w-0">
               <p class="text-sm font-medium text-ink-900 truncate">${escapeHtml(m.email)} ${self ? '<span class="ml-1 rounded-full bg-kumkum-600 text-ivory-50 text-[10px] px-2 py-0.5">You</span>' : ''}</p>
               <p class="text-xs text-ink-400 truncate">Added by ${escapeHtml(m.addedBy || '—')}${addedLine(m)} ${tourChip(m.tourStatus)}</p>
+              <label class="block mt-2 text-[11px] text-ink-500">Groups (comma-separated)
+                <input data-action="member-groups" data-email="${escapeHtml(m.email)}" list="group-label-options" value="${escapeHtml(s.memberGroupsDrafts[m.email] ?? (m.groups || []).join(', '))}" placeholder="Family, Bride side" class="input mt-1 min-h-[40px] py-1.5 text-xs" aria-label="Groups for ${escapeHtml(m.email)}" />
+              </label>
+              <button data-action="save-member-groups" data-email="${escapeHtml(m.email)}" class="btn btn-ghost btn-sm mt-1 min-h-[40px]">Save groups</button>
             </div>
             <select data-action="set-role" data-email="${escapeHtml(m.email)}" aria-label="Role for ${escapeHtml(m.email)}" ${self || busy || lastAdmin ? 'disabled' : ''}
               title="${lockReason(self, lastAdmin, 'You cannot change your own role', 'Change role')}"
@@ -1355,6 +1459,7 @@
 
     return `
       ${pageHeader('Guest list', 'Members &amp; access', 'Only people on this list can open the app. <b>Admins</b> host the event; <b>Atithis</b> (our guests) follow the schedule. Every change is recorded in the AuditLog.')}
+      <datalist id="group-label-options">${s.knownGroups.map((g) => `<option value="${escapeHtml(g)}"></option>`).join('')}</datalist>
       <div class="grid grid-cols-3 gap-2 text-center mb-4">${stat(s.members.length, 'Members')}${stat(adminCount, 'Admins')}${stat(s.members.length - adminCount, 'Atithis')}</div>
       <form data-action="add-member" class="card p-4 mb-4 space-y-2" novalidate>
         <label class="block text-xs font-semibold text-ink-500" for="new-member-email">Invite a guest</label>
@@ -1365,9 +1470,36 @@
             ${spinnerOr('member:add', 'Add')}
           </button>
         </div>
+        <label class="block text-xs font-semibold text-ink-500">Groups (comma-separated, optional)
+          <input name="groups" list="group-label-options" placeholder="Family, Bride side" class="input mt-1" />
+        </label>
       </form>
       <input type="search" data-action="member-search" value="${escapeHtml(s.memberSearch)}" placeholder="Search members…" aria-label="Search members" class="input mb-3" />
       ${list.length ? listHtml : empty}`;
+  };
+
+  Views.notifications = (s) => {
+    const items = s.notifications || [];
+    return `
+      ${pageHeader('Announcements from the hosts', 'Notifications')}
+      <section class="card p-4 mb-3">
+        <p class="text-sm text-ink-600">Announcements sent from Event Control appear here, even if push delivery fails. Messages sent directly from the OneSignal dashboard are not recorded in this history.</p>
+        <button data-action="clear-notifications" ${!items.length || Store.isPending('notifications:clear') ? 'disabled' : ''} class="btn btn-ghost btn-sm mt-3 min-h-[44px]">
+          ${spinnerOr('notifications:clear', 'Clear notifications')}
+        </button>
+      </section>
+      ${items.length ? `<div class="space-y-3">${items.map((n) => `
+        <article class="card p-4">
+          <div class="flex items-start justify-between gap-2">
+            <div class="min-w-0">
+              <h3 class="font-semibold text-kumkum-800">${escapeHtml(n.title)}</h3>
+              <p class="mt-1 text-sm text-ink-700">${escapeHtml(n.message)}</p>
+              <p class="mt-2 text-xs text-ink-400">${escapeHtml(formatDateTime(n.at))}${n.groups?.length ? ` · ${escapeHtml(n.groups.join(', '))}` : ' · Everyone'}</p>
+              ${s.isAdmin ? `<p class="mt-1 text-[11px] text-ink-500">By ${escapeHtml(n.sentBy || '—')} · ${escapeHtml(n.pushStatus || 'Not sent')}</p>` : ''}
+            </div>
+            <span class="text-2xl" aria-hidden="true">🔔</span>
+          </div>
+        </article>`).join('')}</div>` : emptyState('🔔', 'No announcements yet', 'When a host shares an event update, it will appear here.')}`;
   };
 
   /* --------------------------------------------------------------- Render */
@@ -1426,7 +1558,7 @@
 
   function renderNav(s, signedIn) {
     if ((!s.isAdmin && ADMIN_TABS.has(s.tab)) || (s.isAdmin && GUEST_TABS.has(s.tab))) s.tab = 'schedule';
-    $('#nav-grid').className = `max-w-2xl mx-auto grid ${s.isAdmin ? 'grid-cols-4' : 'grid-cols-2'}`;
+    $('#nav-grid').className = `max-w-2xl mx-auto grid ${s.isAdmin ? 'grid-cols-5' : 'grid-cols-3'}`;
     $('#bottom-nav').classList.toggle('hidden', !signedIn);
     $$('.nav-btn').forEach((btn) => {
       const shown = btn.classList.contains('admin-only') ? s.isAdmin : !btn.classList.contains('guest-only') || !s.isAdmin;
@@ -1456,7 +1588,7 @@
     const focusKey = active?.dataset?.action;
     const caret = focusKey && typeof active.selectionStart === 'number' ? active.selectionStart : null;
     const before = memberFormFields();
-    const draft = before ? { email: before.email.value, role: before.role.value, focused: active === before.email } : null;
+    const draft = before ? { email: before.email.value, role: before.role.value, groups: before.groups.value, focused: active === before.email } : null;
 
     $('#view').innerHTML = (Views[s.tab] || Views.schedule)(s);
     applyProgressWidths();
@@ -1465,6 +1597,7 @@
     if (after && draft) {
       after.email.value = draft.email;
       after.role.value = draft.role;
+      after.groups.value = draft.groups;
       if (draft.focused) after.email.focus();
     }
     if (['pickup-search', 'member-search'].includes(focusKey)) {
@@ -1479,6 +1612,7 @@
     return {
       email: /** @type {HTMLInputElement} */ (form.querySelector('[name="email"]')),
       role: /** @type {HTMLSelectElement} */ (form.querySelector('[name="role"]')),
+      groups: /** @type {HTMLInputElement} */ (form.querySelector('[name="groups"]')),
     };
   }
 
@@ -1502,6 +1636,7 @@
 
     refresh() {
       if (Store.state.authStatus === 'offline' && navigator.onLine) {
+        Auth.clearOfflineExpiry();
         const saved = sessionStore.get(STORAGE.CREDENTIAL);
         if (!saved || Auth.isExpired(saved)) { Store.set({ authStatus: 'signed-out', user: null }); Auth.prompt(); return null; }
         Store.set({ authStatus: 'authed', user: saved });
@@ -1594,14 +1729,45 @@
       if (!data) return;
       Store.set({ itinerary: data.itinerary });
       Nudges.remember();
-      const cache = storage.get(STORAGE.DATA_CACHE);
-      if (cache) storage.set(STORAGE.DATA_CACHE, { ...cache, itinerary: data.itinerary, savedAt: new Date().toISOString() });
+      if (Store.state.user?.email) persistOfflineSchedule(Store.state.user.email, Store.state.role, data.itinerary);
       if (status === 'Live') Festive.petals();
       if (data.push?.attempted) {
         Toast.show(data.push.ok ? `"${data.event.title}" is Live — push sent 🔔` : `Status updated, but push failed: ${data.push.error}`, data.push.ok ? 'success' : 'error', 5500);
       } else {
         Toast.show(`"${data.event.title}" set to ${status}`, 'success');
       }
+    },
+
+    async updateEventGroups(eventId) {
+      const ev = findEvent(eventId);
+      if (!ev) return;
+      const groups = Store.state.eventGroupsDrafts[eventId] ?? (ev.groups || []).join(', ');
+      const data = await this.run(`event-groups:${eventId}`, () => Api.post('updateEventGroup', { eventId, title: ev.title, groups }));
+      if (data) {
+        const drafts = { ...Store.state.eventGroupsDrafts };
+        delete drafts[eventId];
+        Store.set({ itinerary: data.itinerary, eventGroupsDrafts: drafts });
+        if (Store.state.user?.email) persistOfflineSchedule(Store.state.user.email, Store.state.role, data.itinerary);
+        Toast.show('Event audience updated.', 'success');
+      }
+    },
+
+    async updateMemberGroups(email) {
+      const member = Store.state.members.find((m) => m.email === email);
+      if (!member) return;
+      const groups = Store.state.memberGroupsDrafts[email] ?? (member.groups || []).join(', ');
+      const data = await this.run(`member-groups:${email}`, () => Api.post('updateMemberGroups', { email, groups }));
+      if (data) {
+        const drafts = { ...Store.state.memberGroupsDrafts };
+        delete drafts[email];
+        Store.set({ members: data.members, memberGroupsDrafts: drafts });
+        Toast.show(`Groups updated for ${email}.`, 'success');
+      }
+    },
+
+    async clearNotifications() {
+      const data = await this.run('notifications:clear', () => Api.post('clearNotifications'), 'Notifications cleared on this account.');
+      if (data) Store.set({ notifications: data.notifications || [] });
     },
 
     async updatePickup(id, status) {
@@ -1626,11 +1792,12 @@
       const { email: input, role: roleSelect } = memberFormFields(form);
       const email = input.value.trim().toLowerCase();
       const role = roleSelect.value;
+      const groups = form.elements.groups.value.trim();
       if (email.length > 254 || !EMAIL_RE.test(email)) { Toast.show('Enter a valid email address.', 'error'); input.focus(); return; }
       if (!ROLES.includes(role)) { Toast.show('Choose a valid role.', 'error'); return; }
       if (Store.state.members.some((m) => m.email === email)) { Toast.show(`${email} is already a member.`, 'info'); return; }
-      const data = await this.run('member:add', () => Api.post('addMember', { email, role }), `${email} added as ${role}`);
-      if (data) { input.value = ''; Store.set({ members: data.members }); }
+      const data = await this.run('member:add', () => Api.post('addMember', { email, role, groups }), `${email} added as ${role}`);
+      if (data) { input.value = ''; form.elements.groups.value = ''; Store.set({ members: data.members }); }
     },
 
     async setRole(email, role) {
@@ -1693,6 +1860,7 @@
             ${field('Time', '<input name="time" type="time" class="input" />')}
           </div>
           ${field('Location name (shown to guests)', '<input name="location" maxlength="200" placeholder="Lawn, Hotel Leela" class="input" />')}
+          ${field('Audience groups (optional; blank means everyone)', '<input name="groups" list="group-label-options" maxlength="300" placeholder="Family, Bride side" class="input" />')}
           <div>
             ${field('Google Maps link (optional)', '<input name="mapLink" type="url" inputmode="url" maxlength="500" placeholder="https://maps.app.goo.gl/…" class="input" />')}
             <div class="mt-1.5 flex flex-wrap gap-2">
@@ -1730,7 +1898,7 @@
           const day = toDayLabel(v.day);
           if (!v.title || !day) { Toast.show('Please add a title and pick a day.', 'error'); return null; }
           if (v.mapLink && !isMapsUrl(v.mapLink)) { Toast.show('Paste a Google Maps link (https://maps.app.goo.gl/… or https://www.google.com/maps/…), or leave it blank.', 'error'); return null; }
-          return { title: v.title, day, time: to12h(v.time), location: v.location, mapLink: v.mapLink };
+          return { title: v.title, day, time: to12h(v.time), location: v.location, mapLink: v.mapLink, groups: v.groups };
         },
         submit: async (payload, key) => {
           const data = await this.run(key, () => Api.post('addEvent', payload), `“${payload.title}” added 🪔`);
@@ -1805,7 +1973,7 @@
       Modal.open(`
         <p class="eyebrow">Broadcast</p>
         <h3 class="font-display text-2xl text-kumkum-700">Set Live &amp; announce</h3>
-        <p class="text-sm text-ink-600 mt-1">This will mark <b>${escapeHtml(ev.title)}</b> as Live, push a notification to all subscribers, and open WhatsApp so you can forward the message to groups or chats.</p>
+        <p class="text-sm text-ink-600 mt-1">This will mark <b>${escapeHtml(ev.title)}</b> as Live and send a push to <b>${escapeHtml((ev.groups || []).join(', ') || 'everyone')}</b>. It also opens WhatsApp so you can forward the message to groups or chats.</p>
         <label class="block text-xs font-semibold text-ink-500 mt-4 mb-1" for="wa-message">WhatsApp message (editable)</label>
         <textarea id="wa-message" rows="8" class="input font-mono text-sm">${escapeHtml(WhatsApp.buildMessage(ev))}</textarea>
         <div class="grid grid-cols-2 gap-2 mt-4">
@@ -1888,6 +2056,9 @@
         case 'open-broadcast': Actions.openBroadcast(id); break;
         case 'add-event': Actions.openAddEvent(); break;
         case 'delete-event': void Actions.deleteEvent(id); break;
+        case 'save-event-groups': void Actions.updateEventGroups(id); break;
+        case 'save-member-groups': void Actions.updateMemberGroups(el.dataset.email); break;
+        case 'clear-notifications': void Actions.clearNotifications(); break;
         case 'add-pickup': Actions.openTravelForm(); break;
         case 'edit-pickup': Actions.openEditTravel(id); break;
         case 'logistics-mode': Store.set({ logisticsMode: el.dataset.value === 'drop' ? 'drop' : 'pickup', pickupFilter: 'all' }); break;
@@ -1927,6 +2098,8 @@
     view.addEventListener('input', (e) => {
       if (e.target.matches('[data-action="pickup-search"]')) Store.set({ pickupSearch: e.target.value });
       if (e.target.matches('[data-action="member-search"]')) Store.set({ memberSearch: e.target.value });
+      if (e.target.matches('[data-action="event-groups"]')) Store.state.eventGroupsDrafts[e.target.dataset.id] = e.target.value;
+      if (e.target.matches('[data-action="member-groups"]')) Store.state.memberGroupsDrafts[e.target.dataset.email] = e.target.value;
     });
 
     view.addEventListener('submit', (e) => {
@@ -1938,7 +2111,15 @@
 
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !Tour.active && !Welcome.open) Modal.close(); });
     window.addEventListener('online', () => { Store.set({ online: true }); void Data.refresh(); });
-    window.addEventListener('offline', () => Store.set({ online: false }));
+    window.addEventListener('offline', () => {
+      Store.set({ online: false });
+      if (Store.state.authStatus === 'authed' && !Auth.restoreOffline()) {
+        Store.set({
+          authStatus: 'offline', role: GUEST_ROLE, isAdmin: false, itinerary: [], logistics: [], members: [],
+          myTravel: [], notifications: [], groups: [], knownGroups: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {},
+        });
+      }
+    });
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') { void Data.refresh(); Push.render(); }
     });

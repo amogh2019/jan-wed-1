@@ -42,6 +42,7 @@ var SHEETS = {
   LOGISTICS: 'Logistics',
   MEMBERS: 'Members',
   AUDIT: 'AuditLog',
+  NOTIFICATIONS: 'Notifications', // in-app notification centre (one row per announcement sent)
   LEGACY_ADMINS: 'Admins', // migrated into Members by setup()
 };
 
@@ -50,14 +51,17 @@ var HEADERS = {
   Logistics: ['ID', 'Name', 'Members', 'Contact', 'ArrivalDateTime', 'DepartureDateTime', 'Mode', 'PickupStatus'],
   Members: ['Email', 'Role', 'AddedBy', 'AddedDate'],
   AuditLog: ['Timestamp', 'UserEmail', 'ActionCategory', 'Details'],
+  Notifications: ['Timestamp', 'Title', 'Message', 'EventID', 'Groups', 'SentBy', 'PushStatus'],
 };
 
 // Columns added in later versions. Read paths tolerate their absence; setup()
 // (or the first write that needs them) appends them to the right of existing data.
 var OPTIONAL_HEADERS = {
   // MapLink: optional Google Maps link guests are taken to when they tap the ceremony's location.
-  Itinerary: ['MapLink'],
-  Members: ['TourStatus', 'TourCompletedAt'],
+  // Group: blank = for everyone; otherwise comma-separated labels ("Bride side, Family").
+  Itinerary: ['MapLink', 'Group'],
+  // Groups: the member's labels; NotificationsClearedAt: when they last tapped "Clear" in Notifications.
+  Members: ['TourStatus', 'TourCompletedAt', 'Groups', 'NotificationsClearedAt'],
   // Email links a travel row to the Atithi who sees it on "My travel"; DropStatus tracks the departure drop-off.
   Logistics: ['Email', 'DropStatus'],
 };
@@ -101,7 +105,15 @@ var TOKEN_CACHE_SECONDS = 3600;
 // The schedule is read by every poll; writes through the app clear this cache immediately.
 // Edits made directly in the Sheet show up within this many seconds.
 var ITINERARY_CACHE_SECONDS = 30;
-var ITINERARY_CACHE_KEY = 'itinerary_v1';
+var ITINERARY_CACHE_KEY = 'itinerary_v2';
+var NOTIFICATIONS_CACHE_KEY = 'notifications_v1';
+var NOTIFICATIONS_KEEP = 100;   // newest rows kept in cache / considered
+var NOTIFICATIONS_LIMIT = 50;   // newest rows sent to a member
+// Group labels: short, comma-free text. Matching is case-insensitive.
+var MAX_GROUPS = 10;
+var MAX_GROUP_LEN = 30;
+var GROUP_RE = /^[^,<>"`\u0000-\u001f]+$/;
+var MAX_PUSH_ALIASES = 2000; // OneSignal limit per request for include_aliases
 
 /* ----------------------------------------------------------------------------
  *  HTTP entry points
@@ -142,6 +154,8 @@ function authenticate_(req) {
   }
   user.role = member.role;
   user.tourStatus = member.tourStatus;
+  user.groups = member.groups;
+  user.notificationsClearedAt = member.notificationsClearedAt;
   return user;
 }
 
@@ -188,6 +202,7 @@ function runLocked_(handler, memberAction, user, req) {
  * member list are admin-only; everyone gets just their own travel rows ("myTravel").
  */
 function buildSession_(user, admin) {
+  var itinerary = cachedItinerary_();
   var session = {
     email: user.email,
     name: user.name,
@@ -195,7 +210,11 @@ function buildSession_(user, admin) {
     role: user.role,
     isAdmin: admin,
     tourStatus: user.tourStatus || 'Pending',
-    itinerary: cachedItinerary_(),
+    groups: user.groups || [],
+    // Guests only get ceremonies for everyone or for one of their groups; hosts see the whole programme.
+    itinerary: admin ? itinerary : itinerary.filter(function (e) { return inGroups_(e.groups, user.groups); }),
+    notifications: notificationsFor_(user, admin),
+    pushId: pushIdFor_(user.email),
     familyContact: familyContact_(),
     serverTime: new Date().toISOString(),
   };
@@ -204,6 +223,7 @@ function buildSession_(user, admin) {
   if (admin) {
     session.logistics = logistics;
     session.members = readMembers_();
+    session.knownGroups = knownGroups_(session.members, itinerary);
   }
   return session;
 }
@@ -280,7 +300,11 @@ var ACTIONS_ = {
 
     var details = 'Changed Event ' + eventId + ' ("' + event.title + '") from ' +
       (previous || 'blank') + ' to ' + status;
-    if (push.attempted) details += push.ok ? ' — push sent' : ' — push FAILED: ' + push.error;
+    if (push.attempted) {
+      details += (push.ok ? ' — push sent' : ' — push FAILED: ' + push.error) + ' to ' + audienceLabel_(event.groups);
+      // The in-app Notifications list shows the announcement even if the push itself failed.
+      logNotification_(push.message, event, user.email, push);
+    }
     writeAudit_(user.email, AUDIT_CATEGORY.EVENT, details, req.timestamp);
 
     return { event: event, push: push, itinerary: refreshItineraryCache_() };
@@ -361,14 +385,16 @@ var ACTIONS_ = {
     var time = optionalString_(payload.time, 'time');
     var location = optionalString_(payload.location, 'location');
     var mapLink = optionalMapLink_(payload.mapLink);
-    if (mapLink) ensureColumns_(SHEETS.ITINERARY, OPTIONAL_HEADERS.Itinerary);
+    var groups = requireGroups_(payload.groups);
+    if (mapLink || groups.length) ensureColumns_(SHEETS.ITINERARY, OPTIONAL_HEADERS.Itinerary);
 
     // New events always start as Upcoming; going Live (with push) is a separate, deliberate action.
     var table = readTable_(SHEETS.ITINERARY);
     var id = nextId_(table, 'EventID', DEFAULT_ID_PREFIX.Itinerary);
-    appendRecord_(table, { EventID: id, Day: day, Time: time, Title: title, Location: location, MapLink: mapLink, Status: 'Upcoming' });
+    appendRecord_(table, { EventID: id, Day: day, Time: time, Title: title, Location: location, MapLink: mapLink, Group: groups.join(', '), Status: 'Upcoming' });
     writeAudit_(user.email, AUDIT_CATEGORY.EVENT, 'Added Event ' + id + ' ("' + title + '") on ' + day +
-      (time ? ' at ' + time : '') + (location ? ' @ ' + location : '') + (mapLink ? ' (map: ' + mapLink + ')' : ''), req.timestamp);
+      (time ? ' at ' + time : '') + (location ? ' @ ' + location : '') + (mapLink ? ' (map: ' + mapLink + ')' : '') +
+      (groups.length ? ' for ' + audienceLabel_(groups) : ''), req.timestamp);
 
     return { eventId: id, itinerary: refreshItineraryCache_() };
   },
@@ -396,12 +422,52 @@ var ACTIONS_ = {
   addMember: function (payload, user, req) {
     var email = requireEmail_(payload.email);
     var role = requireRole_(payload.role || ROLES.ATITHI);
+    var groups = requireGroups_(payload.groups);
     if (getMember_(email)) throw new AppError('CONFLICT', email + ' is already a member.');
 
-    appendSafe_(SHEETS.MEMBERS, [email, role, user.email, new Date()]);
-    writeAudit_(user.email, AUDIT_CATEGORY.ADMIN, 'Added ' + email + ' to Members as ' + role, req.timestamp);
+    if (groups.length) ensureColumns_(SHEETS.MEMBERS, OPTIONAL_HEADERS.Members);
+    appendRecord_(readTable_(SHEETS.MEMBERS), { Email: email, Role: role, AddedBy: user.email, AddedDate: new Date(), Groups: groups.join(', ') });
+    writeAudit_(user.email, AUDIT_CATEGORY.ADMIN, 'Added ' + email + ' to Members as ' + role +
+      (groups.length ? ' in groups ' + groups.join(', ') : ''), req.timestamp);
 
     return { members: readMembers_() };
+  },
+
+  /** Replaces a member's group labels (blank = no groups: they then see only ceremonies for everyone). */
+  updateMemberGroups: function (payload, user, req) {
+    var email = requireEmail_(payload.email, true);
+    var groups = requireGroups_(payload.groups);
+    ensureColumns_(SHEETS.MEMBERS, OPTIONAL_HEADERS.Members);
+    var table = readTable_(SHEETS.MEMBERS);
+    var row = findMemberRow_(table, email);
+    if (!row) throw new AppError('NOT_FOUND', email + ' is not a member.');
+
+    var previous = parseGroups_(row.values.Groups);
+    if (sameGroups_(previous, groups)) return { members: readMembers_() };
+    setCell_(table, row, 'Groups', groups.join(', '));
+    writeAudit_(user.email, AUDIT_CATEGORY.ADMIN, 'Changed groups of ' + email + ' from ' +
+      (previous.join(', ') || 'none') + ' to ' + (groups.join(', ') || 'none'), req.timestamp);
+
+    return { members: readMembers_() };
+  },
+
+  /** Sets who a ceremony is for. Blank = all current Members; otherwise only matching group members. */
+  updateEventGroup: function (payload, user, req) {
+    var eventId = requireString_(payload.eventId, 'eventId');
+    var groups = requireGroups_(payload.groups);
+    ensureColumns_(SHEETS.ITINERARY, OPTIONAL_HEADERS.Itinerary);
+    var table = readTable_(SHEETS.ITINERARY);
+    var row = findRow_(table, 'EventID', eventId);
+    if (!row) throw new AppError('NOT_FOUND', 'Event ' + eventId + ' not found.');
+    assertSameEvent_(row, payload.title);
+
+    var previous = parseGroups_(row.values.Group);
+    if (!sameGroups_(previous, groups)) {
+      setCell_(table, row, 'Group', groups.join(', '));
+      writeAudit_(user.email, AUDIT_CATEGORY.EVENT, 'Changed audience of Event ' + eventId + ' ("' +
+        String(row.values.Title || '').trim() + '") from ' + audienceLabel_(previous) + ' to ' + audienceLabel_(groups), req.timestamp);
+    }
+    return { itinerary: refreshItineraryCache_() };
   },
 
   updateMemberRole: function (payload, user, req) {
@@ -470,6 +536,21 @@ var MEMBER_ACTIONS_ = {
     setCell_(table, row, 'TourCompletedAt', new Date());
     writeAudit_(user.email, AUDIT_CATEGORY.ONBOARDING, 'Welcome tour ' + status.toLowerCase(), req.timestamp);
     return { tourStatus: status };
+  },
+
+  /**
+   * "Clear" in the Notifications tab: hides everything sent so far for this member, on every device.
+   * Only the caller's own row is touched. Not audited: it is a personal view preference, not an admin change.
+   */
+  clearNotifications: function (payload, user) {
+    ensureColumns_(SHEETS.MEMBERS, OPTIONAL_HEADERS.Members);
+    var table = readTable_(SHEETS.MEMBERS);
+    var row = findMemberRow_(table, user.email);
+    if (!row) throw new AppError('NOT_MEMBER', 'This Google account is not on the guest list.');
+    var now = new Date();
+    setCell_(table, row, 'NotificationsClearedAt', now);
+    user.notificationsClearedAt = now.toISOString();
+    return { notifications: notificationsFor_(user, normalizeRole_(row.values.Role) === ROLES.ADMIN) };
   },
 };
 
@@ -630,24 +711,37 @@ function requireRole_(value) {
  *  OneSignal push (REST key never leaves the server)
  * ------------------------------------------------------------------------- */
 
+/**
+ * Live push. Ceremonies with no group go to all current members; labelled ones go only to the
+ * devices of members in those groups (OneSignal external_id = pushIdFor_(email), set by the app).
+ * The result always carries `message` ({title, body}) so it can be logged in Notifications.
+ */
 function sendLivePush_(event) {
+  var groups = event.groups || [];
+  var message = {
+    title: '\uD83E\uDE94 Live now: ' + event.title,
+    body: [event.title, event.location ? '@ ' + event.location : '', event.time ? '(' + event.time + ')' : '']
+      .filter(String).join(' ') + ' \u2014 please gather at the venue!',
+  };
+  var fail = function (error) { return { attempted: true, ok: false, error: error, message: message }; };
+
   var appId = getProp_('ONESIGNAL_APP_ID', false);
   var apiKey = getProp_('ONESIGNAL_REST_API_KEY', false);
-  if (!appId || !apiKey) {
-    return { attempted: true, ok: false, error: 'OneSignal is not configured in Script Properties.' };
-  }
+  if (!appId || !apiKey) return fail('OneSignal is not configured in Script Properties.');
 
   var body = {
     app_id: appId,
     target_channel: 'push',
-    included_segments: ['Total Subscriptions'],
-    headings: { en: '\uD83E\uDE94 Live now: ' + event.title },
-    contents: {
-      en: [event.title, event.location ? '@ ' + event.location : '', event.time ? '(' + event.time + ')' : '']
-        .filter(String).join(' ') + ' \u2014 please gather at the venue!',
-    },
+    headings: { en: message.title },
+    contents: { en: message.body },
     web_push_topic: 'event-live',
   };
+  var ids = groupPushIds_(groups);
+  if (!ids.length) return fail(groups.length ? 'No members are in group ' + groups.join(', ') + ' yet.' : 'There are no current members to notify.');
+  if (ids.length > MAX_PUSH_ALIASES) {
+    return fail('This audience has ' + ids.length + ' members, above OneSignal\'s ' + MAX_PUSH_ALIASES + '-recipient limit. Split it into smaller groups.');
+  }
+  body.include_aliases = { external_id: ids };
   var appUrl = getProp_('APP_URL', false);
   if (appUrl) body.url = appUrl;
 
@@ -662,17 +756,192 @@ function sendLivePush_(event) {
     var code = res.getResponseCode();
     var parsed = safeJson_(res.getContentText()) || {};
     if (code >= 200 && code < 300 && !parsed.errors) {
-      return { attempted: true, ok: true, id: parsed.id || null };
+      return { attempted: true, ok: true, id: parsed.id || null, message: message };
     }
     var msg = parsed.errors ? JSON.stringify(parsed.errors) : 'HTTP ' + code;
     if (/not subscribed/i.test(msg)) {
       msg += ' \u2014 no device has finished subscribing yet. If phones did tap "Notify me", check OneSignal'
         + ' \u2192 Settings \u2192 Push & In-App \u2192 Web: integration must be "Custom Code" (see DEVELOPER_GUIDE "Push").';
+      if (groups.length) msg = 'None of the devices of group ' + groups.join(', ') + ' are subscribed yet (members must open the updated app once with notifications on). ' + msg;
     }
-    return { attempted: true, ok: false, error: msg.slice(0, 400) };
+    return fail(msg.slice(0, 400));
   } catch (err) {
-    return { attempted: true, ok: false, error: String(err && err.message || err).slice(0, 300) };
+    return fail(String(err && err.message || err).slice(0, 300));
   }
+}
+
+/* ----------------------------------------------------------------------------
+ *  Group labels
+ * ------------------------------------------------------------------------- */
+
+/** "Bride side, bride side ,Family" -> ['Bride side', 'Family'] (first spelling wins, case-insensitive). */
+function parseGroups_(value) {
+  var seen = Object.create(null);
+  var out = [];
+  String(value == null ? '' : value).split(',').forEach(function (part) {
+    var g = part.replace(/\s+/g, ' ').trim();
+    var key = g.toLowerCase();
+    if (!g || seen[key]) return;
+    seen[key] = true;
+    out.push(g);
+  });
+  return out;
+}
+
+/** Validates labels sent by a client: an array of strings or one comma-separated string. Blank = none. */
+function requireGroups_(value) {
+  if (value == null) return [];
+  var parts = Array.isArray(value) ? value : [value];
+  parts.forEach(function (p) {
+    if (typeof p !== 'string') throw new AppError('BAD_REQUEST', '"groups" must be text.');
+  });
+  var groups = parseGroups_(parts.join(','));
+  if (groups.length > MAX_GROUPS) throw new AppError('BAD_REQUEST', 'At most ' + MAX_GROUPS + ' groups are allowed.');
+  groups.forEach(function (g) {
+    if (g.length > MAX_GROUP_LEN || !GROUP_RE.test(g)) {
+      throw new AppError('BAD_REQUEST', 'Group "' + g.slice(0, MAX_GROUP_LEN) + '" must be up to ' + MAX_GROUP_LEN + ' characters without < > " or `.');
+    }
+  });
+  return groups;
+}
+
+/** True when an item for `targetGroups` is meant for someone in `memberGroups`. No target groups = everyone. */
+function inGroups_(targetGroups, memberGroups) {
+  if (!targetGroups || !targetGroups.length) return true;
+  var mine = (memberGroups || []).map(function (g) { return g.toLowerCase(); });
+  return targetGroups.some(function (g) { return mine.indexOf(g.toLowerCase()) >= 0; });
+}
+
+function sameGroups_(a, b) {
+  var norm = function (list) { return list.map(function (g) { return g.toLowerCase(); }).sort().join(','); };
+  return a.length === b.length && norm(a) === norm(b);
+}
+
+function audienceLabel_(groups) {
+  return groups && groups.length ? 'group ' + groups.join(', ') : 'everyone';
+}
+
+/** Every label in use (members and ceremonies), for the admin pickers. */
+function knownGroups_(members, itinerary) {
+  var all = [];
+  members.forEach(function (m) { all = all.concat(m.groups || []); });
+  itinerary.forEach(function (e) { all = all.concat(e.groups || []); });
+  return parseGroups_(all.join(',')).sort(function (a, b) { return a.toLowerCase() < b.toLowerCase() ? -1 : 1; });
+}
+
+/* ----------------------------------------------------------------------------
+ *  Push identity: each member's device is tagged in OneSignal with an opaque
+ *  external_id derived from their email, so labelled pushes reach only that
+ *  group. The HMAC secret stays in Script Properties, so nobody can compute
+ *  another member's ID from their email.
+ * ------------------------------------------------------------------------- */
+
+var pushSecretMemo_ = null;
+
+function pushSecret_() {
+  if (pushSecretMemo_) return pushSecretMemo_;
+  var props = PropertiesService.getScriptProperties();
+  var secret = props.getProperty('PUSH_ID_SECRET');
+  if (!secret) {
+    // setup() creates it up front; this fallback only runs if setup() was not re-run after upgrading.
+    // (No lock here: callers may already hold the script lock.)
+    secret = Utilities.getUuid() + Utilities.getUuid();
+    props.setProperty('PUSH_ID_SECRET', secret);
+  }
+  pushSecretMemo_ = secret;
+  return secret;
+}
+
+function pushIdFor_(email) {
+  var sig = Utilities.computeHmacSha256Signature(normalizeEmail_(email), pushSecret_());
+  return 'm_' + sig.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join('').slice(0, 40);
+}
+
+function groupPushIds_(groups) {
+  return readMembers_()
+    .filter(function (m) { return inGroups_(groups, m.groups); })
+    .map(function (m) { return pushIdFor_(m.email); });
+}
+
+/* ----------------------------------------------------------------------------
+ *  Notification centre (one row per announcement; read by every session)
+ * ------------------------------------------------------------------------- */
+
+/** Appends an announcement, creating the Notifications tab on first use (never touches existing data). */
+function logNotification_(message, event, senderEmail, push) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(SHEETS.NOTIFICATIONS);
+  if (!sheet) sheet = ss.insertSheet(SHEETS.NOTIFICATIONS);
+  if (sheet.getLastRow() === 0 && sheet.getLastColumn() === 0) {
+    sheet.getRange(1, 1, 1, HEADERS.Notifications.length).setValues([HEADERS.Notifications]).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+  } else {
+    ensureColumns_(SHEETS.NOTIFICATIONS, HEADERS.Notifications);
+  }
+  appendRecord_(readTable_(SHEETS.NOTIFICATIONS), {
+    Timestamp: new Date(),
+    Title: String(message.title).slice(0, MAX_FIELD_LEN),
+    Message: String(message.body).slice(0, 500),
+    EventID: event.id || '',
+    Groups: (event.groups || []).join(', '),
+    SentBy: normalizeEmail_(senderEmail),
+    PushStatus: push.ok ? 'Sent' : ('Failed: ' + push.error).slice(0, 300),
+  });
+  return refreshNotificationsCache_();
+}
+
+function cachedNotifications_() {
+  var hit = CacheService.getScriptCache().get(NOTIFICATIONS_CACHE_KEY);
+  if (hit) return JSON.parse(hit);
+  return refreshNotificationsCache_();
+}
+
+/** Newest first. A missing or half-set-up tab simply means "no notifications yet". */
+function refreshNotificationsCache_() {
+  var list = [];
+  try {
+    var rows = readTable_(SHEETS.NOTIFICATIONS).rows.filter(function (r) {
+      return String(r.values.Title || '').trim() !== '';
+    });
+    list = rows.slice(-NOTIFICATIONS_KEEP).reverse().map(function (r) {
+      var v = r.values;
+      return {
+        id: String(r.rowIndex),
+        at: toIso_(v.Timestamp),
+        title: String(v.Title || '').trim(),
+        message: String(v.Message || '').trim(),
+        eventId: String(v.EventID == null ? '' : v.EventID).trim(),
+        groups: parseGroups_(v.Groups),
+        sentBy: normalizeEmail_(v.SentBy),
+        pushStatus: String(v.PushStatus || '').trim(),
+      };
+    });
+  } catch (err) {
+    if (!(err instanceof AppError && err.code === 'CONFIG')) throw err;
+  }
+  var json = JSON.stringify(list);
+  if (json.length < 90000) CacheService.getScriptCache().put(NOTIFICATIONS_CACHE_KEY, json, ITINERARY_CACHE_SECONDS);
+  return list;
+}
+
+/** What this member sees: their groups only (hosts see all), newer than their last "Clear". */
+function notificationsFor_(user, admin) {
+  var clearedAt = user.notificationsClearedAt ? Date.parse(user.notificationsClearedAt) : 0;
+  return cachedNotifications_()
+    .filter(function (n) { return admin || inGroups_(n.groups, user.groups); })
+    .filter(function (n) { return !clearedAt || !n.at || Date.parse(n.at) > clearedAt; })
+    .slice(0, NOTIFICATIONS_LIMIT)
+    .map(function (n) {
+      var out = { id: n.id, at: n.at, title: n.title, message: n.message, eventId: n.eventId, groups: n.groups };
+      if (admin) { out.sentBy = n.sentBy; out.pushStatus = n.pushStatus; }
+      return out;
+    });
+}
+
+function toIso_(v) {
+  if (v instanceof Date) return isNaN(v.getTime()) ? '' : v.toISOString();
+  var t = Date.parse(String(v == null ? '' : v));
+  return isNaN(t) ? '' : new Date(t).toISOString();
 }
 
 /* ----------------------------------------------------------------------------
@@ -709,6 +978,7 @@ function toEvent_(v, statusOverride) {
     title: String(v.Title || '').trim(),
     location: String(v.Location || '').trim(),
     mapLink: isMapsUrl_(String(v.MapLink || '').trim()) ? String(v.MapLink).trim() : '',
+    groups: parseGroups_(v.Group),
     status: EVENT_STATUSES.indexOf(status) >= 0 ? status : 'Upcoming',
   };
 }
@@ -744,6 +1014,8 @@ function readMembers_() {
         addedBy: String(r.values.AddedBy || ''),
         addedDate: formatDateTime_(r.values.AddedDate),
         tourStatus: normalizeTour_(r.values.TourStatus),
+        groups: parseGroups_(r.values.Groups),
+        notificationsClearedAt: toIso_(r.values.NotificationsClearedAt),
       };
     })
     .filter(function (m) { return m.email; });
@@ -1135,6 +1407,11 @@ function setup() {
     if (n) report.push(name + ': backfilled ' + n + ' blank cell(s) with defaults');
   });
 
+  if (!getProp_('PUSH_ID_SECRET', false)) {
+    pushSecret_();
+    report.push('created Script Property PUSH_ID_SECRET (group-targeted push)');
+  }
+
   var summary = report.length ? 'Schema check: ' + report.join('; ') : 'Schema check: no changes needed';
   if (report.length) writeAudit_(me, AUDIT_CATEGORY.SCHEMA, summary);
   console.log(summary);
@@ -1170,7 +1447,7 @@ function migrateViewerToAtithi() {
   return changed;
 }
 
-/** Sends a test push to all subscribers to validate the OneSignal configuration. */
+/** Sends a test push to current Members to validate OneSignal identity/subscription configuration. */
 function testPush() {
   var result = sendLivePush_({ title: 'Test notification', location: 'Main Hall', time: 'now' });
   console.log(JSON.stringify(result));

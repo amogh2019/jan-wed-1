@@ -72,7 +72,7 @@ test('admin session includes logistics and members', () => {
 
 test('viewers cannot run admin actions and the attempt is audited', () => {
   const b = withViewer();
-  for (const action of ['updateEvent', 'updatePickup', 'addEvent', 'addPickup', 'addMember', 'updateMemberRole', 'removeMember', 'addAdmin', 'deleteEvent']) {
+  for (const action of ['updateEvent', 'updatePickup', 'addEvent', 'addPickup', 'addMember', 'updateMemberRole', 'removeMember', 'addAdmin', 'deleteEvent', 'updateMemberGroups', 'updateEventGroup']) {
     assert.equal(b.call(VIEWER, action, { eventId: '1', status: 'Live', email: 'x@example.com' }).code, 'FORBIDDEN');
   }
   assert.ok(b.audit().every((r) => r[2] === 'Security' && r[1] === VIEWER));
@@ -220,7 +220,7 @@ test('tour: works on a legacy Members sheet with no tour columns and only touche
   assert.equal(out.ok, true);
   assert.equal(out.data.tourStatus, 'Skipped');
   const [header, adminRow, viewerRow] = b.sheets.Members.data;
-  assert.deepEqual(header, ['Email', 'Role', 'AddedBy', 'AddedDate', 'TourStatus', 'TourCompletedAt']);
+  assert.deepEqual(header, ['Email', 'Role', 'AddedBy', 'AddedDate', 'TourStatus', 'TourCompletedAt', 'Groups', 'NotificationsClearedAt']);
   assert.equal(viewerRow[4], 'Skipped');
   assert.equal(Object.prototype.toString.call(viewerRow[5]), '[object Date]');
   assert.ok(adminRow[4] === undefined || adminRow[4] === '', 'other members untouched');
@@ -247,8 +247,10 @@ test('tour: rejects bad status and non-members', () => {
 test('setup: creates missing tabs and headers on an empty workbook', () => {
   const b = createBackend({ members: [], overrides: { Itinerary: null, Logistics: null, Members: null, AuditLog: null } });
   b.sandbox.setup();
-  assert.deepEqual(b.sheets.Itinerary.data[0], ['EventID', 'Day', 'Time', 'Title', 'Location', 'Status', 'MapLink']);
-  assert.deepEqual(b.sheets.Members.data[0], ['Email', 'Role', 'AddedBy', 'AddedDate', 'TourStatus', 'TourCompletedAt']);
+  assert.deepEqual(b.sheets.Itinerary.data[0], ['EventID', 'Day', 'Time', 'Title', 'Location', 'Status', 'MapLink', 'Group']);
+  assert.deepEqual(b.sheets.Members.data[0], ['Email', 'Role', 'AddedBy', 'AddedDate', 'TourStatus', 'TourCompletedAt', 'Groups', 'NotificationsClearedAt']);
+  assert.deepEqual(b.sheets.Notifications.data[0], ['Timestamp', 'Title', 'Message', 'EventID', 'Groups', 'SentBy', 'PushStatus']);
+  assert.ok(b.properties.PUSH_ID_SECRET, 'push-ID secret generated');
   assert.equal(b.sheets.Members.data[1][0], 'owner@example.com');
   assert.equal(b.sheets.Members.data[1][1], 'Admin');
 });
@@ -270,7 +272,7 @@ test('setup: existing data is preserved; missing columns appended; only blank ce
   const summary = b.sandbox.setup();
 
   const it = b.sheets.Itinerary.data;
-  assert.deepEqual(it[0], ['title', 'EventID', 'Day', 'Time', 'Location', ' status ', 'Notes', 'MapLink'], 'existing headers kept in place; new column appended');
+  assert.deepEqual(it[0], ['title', 'EventID', 'Day', 'Time', 'Location', ' status ', 'Notes', 'MapLink', 'Group'], 'existing headers kept in place; new column appended');
   assert.equal(it[1][5], 'Upcoming', 'blank status backfilled');
   assert.equal(it[2][5], 'Live', 'filled status untouched');
   assert.equal(it[1][6], 'bring henna', 'extra column preserved');
@@ -278,11 +280,11 @@ test('setup: existing data is preserved; missing columns appended; only blank ce
   assert.notEqual(JSON.stringify(it), before);
 
   const m = b.sheets.Members.data;
-  assert.deepEqual(m[0].slice(4), ['TourStatus', 'TourCompletedAt'], 'new columns appended to the right');
+  assert.deepEqual(m[0].slice(4), ['TourStatus', 'TourCompletedAt', 'Groups', 'NotificationsClearedAt'], 'new columns appended to the right');
   assert.equal(m[2][1], 'Atithi', 'blank role defaulted');
   assert.equal(m[1][4], 'Pending');
   assert.equal(m.length, 3, 'owner not re-seeded when Members already has people');
-  assert.match(summary, /added columns TourStatus, TourCompletedAt/);
+  assert.match(summary, /added columns TourStatus, TourCompletedAt, Groups, NotificationsClearedAt/);
   assert.equal(b.audit().at(-1)[2], 'Schema');
 });
 
@@ -395,7 +397,7 @@ test('addEvent: optional Google Maps link adds the MapLink column only when used
   }
   const out = b.call(ADMIN, 'addEvent', { title: 'C', day: 'Day 1', location: 'Lawn', mapLink: 'https://maps.app.goo.gl/abc123' });
   assert.equal(out.ok, true);
-  assert.equal(b.sheets.Itinerary.data[0].at(-1), 'MapLink');
+  assert.ok(b.sheets.Itinerary.data[0].includes('MapLink'));
   assert.equal(out.data.itinerary.at(-1).mapLink, 'https://maps.app.goo.gl/abc123');
   assert.equal(out.data.itinerary.at(-2).mapLink, '');
   assert.match(b.audit().at(-1)[3], /map: https:\/\/maps\.app\.goo\.gl\/abc123/);
@@ -502,4 +504,135 @@ test('session: a guest still signs in when the Logistics tab is missing', () => 
   assert.equal(out.ok, true);
   assert.deepEqual([...out.data.myTravel], []);
   assert.equal(out.data.familyContact, null);
+});
+
+/* ------------------------------------------------ Group labels & notification centre */
+
+const GUEST_A = 'a@example.com';
+const GUEST_B = 'b@example.com';
+const grouped = () => createBackend({
+  members: [[ADMIN, 'Admin', 'seed', ''], [GUEST_A, 'Atithi', ADMIN, ''], [GUEST_B, 'Atithi', ADMIN, '']],
+});
+
+test('groups: labels are validated, de-duplicated case-insensitively, and audited', () => {
+  const b = grouped();
+  assert.equal(b.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: ['x'.repeat(31)] }).code, 'BAD_REQUEST');
+  assert.equal(b.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: ['<b>'] }).code, 'BAD_REQUEST');
+  assert.equal(b.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: [1] }).code, 'BAD_REQUEST');
+  assert.equal(b.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: Array.from({ length: 11 }, (_, i) => `g${i}`) }).code, 'BAD_REQUEST');
+  assert.equal(b.call(ADMIN, 'updateMemberGroups', { email: 'ghost@example.com', groups: ['A'] }).code, 'NOT_FOUND');
+  const out = b.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: ['Bride  side', 'bride side', ' Family '] });
+  assert.equal(out.ok, true);
+  assert.deepEqual(out.data.members.find((m) => m.email === GUEST_A).groups, ['Bride side', 'Family']);
+  const col = b.sheets.Members.data[0].indexOf('Groups');
+  assert.equal(b.sheets.Members.data[2][col], 'Bride side, Family');
+  assert.match(b.audit().at(-1)[3], /Changed groups of a@example.com from none to Bride side, Family/);
+  const audits = b.audit().length;
+  b.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: 'family, BRIDE SIDE' });
+  assert.equal(b.audit().length, audits, 'same set in another order/case is a no-op');
+});
+
+test('groups: prototype-like labels are preserved and never turn a private event public', () => {
+  const b = grouped();
+  b.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: ['constructor', 'toString'] });
+  b.call(ADMIN, 'updateEventGroup', { eventId: '1', groups: ['constructor'] });
+  assert.deepEqual(b.call(GUEST_A, 'session').data.groups, ['constructor', 'toString']);
+  assert.deepEqual(b.call(GUEST_A, 'session').data.itinerary.map((e) => e.title), ['Welcome Brunch', 'Sangeet']);
+  assert.deepEqual(b.call(GUEST_B, 'session').data.itinerary.map((e) => e.title), ['Sangeet']);
+});
+
+test('groups: guests see ceremonies for everyone plus their groups; hosts see all', () => {
+  const b = grouped();
+  b.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: ['Bride side'] });
+  assert.equal(b.call(ADMIN, 'addEvent', { title: 'Haldi', day: 'Day 1', groups: ['bride SIDE'] }).ok, true);
+  assert.match(b.audit().at(-1)[3], /for group bride SIDE/);
+  b.call(ADMIN, 'updateEventGroup', { eventId: '1', title: 'Welcome Brunch', groups: ['Groom side'] });
+  assert.match(b.audit().at(-1)[3], /audience of Event 1 .* from everyone to group Groom side/);
+  assert.equal(b.call(ADMIN, 'updateEventGroup', { eventId: '1', title: 'Wrong', groups: [] }).code, 'CONFLICT');
+
+  const titles = (email) => b.call(email, 'session').data.itinerary.map((e) => e.title);
+  assert.deepEqual(titles(GUEST_A), ['Sangeet', 'Haldi']);
+  assert.deepEqual(titles(GUEST_B), ['Sangeet']);
+  assert.deepEqual(titles(ADMIN), ['Welcome Brunch', 'Sangeet', 'Haldi']);
+  const admin = b.call(ADMIN, 'session').data;
+  assert.deepEqual(admin.knownGroups, ['Bride side', 'Groom side']);
+  assert.deepEqual(b.call(GUEST_A, 'session').data.groups, ['Bride side']);
+});
+
+test('addMember: optional groups are stored with the new member', () => {
+  const b = createBackend();
+  const out = b.call(ADMIN, 'addMember', { email: 'new@example.com', role: 'Atithi', groups: 'Family' });
+  assert.equal(out.ok, true);
+  assert.deepEqual(out.data.members.find((m) => m.email === 'new@example.com').groups, ['Family']);
+  assert.match(b.audit().at(-1)[3], /in groups Family/);
+});
+
+test('push: everyone-events go to current member IDs; labelled events only to that group\'s opaque IDs', () => {
+  const b = grouped();
+  b.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: ['Bride side'] });
+  const pushIdA = b.call(GUEST_A, 'session').data.pushId;
+  const pushIdB = b.call(GUEST_B, 'session').data.pushId;
+  const pushIdAdmin = b.call(ADMIN, 'session').data.pushId;
+  assert.match(pushIdA, /^m_[0-9a-f]{40}$/);
+  assert.notEqual(pushIdA, pushIdB);
+  assert.ok(!pushIdA.includes('example'), 'email is not exposed');
+
+  b.call(ADMIN, 'updateEvent', { eventId: '2', status: 'Live', notify: true });
+  let body = JSON.parse(b.fetches.filter((f) => f.url.includes('onesignal')).at(-1).opts.payload);
+  assert.equal(body.included_segments, undefined);
+  assert.deepEqual(body.include_aliases, { external_id: [pushIdAdmin, pushIdA, pushIdB] });
+
+  b.call(ADMIN, 'updateEventGroup', { eventId: '1', groups: ['bride side'] });
+  b.call(ADMIN, 'updateEvent', { eventId: '1', status: 'Live', notify: true });
+  body = JSON.parse(b.fetches.filter((f) => f.url.includes('onesignal')).at(-1).opts.payload);
+  assert.equal(body.included_segments, undefined);
+  assert.deepEqual(body.include_aliases, { external_id: [pushIdA] });
+  assert.match(b.audit().at(-1)[3], /push sent to group bride side/);
+});
+
+test('push: a labelled event with nobody in the group is not sent but still logged', () => {
+  const b = grouped();
+  b.call(ADMIN, 'updateEventGroup', { eventId: '1', groups: ['Nobody'] });
+  const sent = b.fetches.length;
+  const out = b.call(ADMIN, 'updateEvent', { eventId: '1', status: 'Live', notify: true });
+  assert.equal(out.data.push.ok, false);
+  assert.match(out.data.push.error, /No members are in group Nobody/);
+  assert.equal(b.fetches.length, sent, 'no OneSignal call');
+  assert.match(b.sheets.Notifications.data.at(-1)[6], /^Failed:/);
+});
+
+test('notifications: Live announcements are logged, filtered by group, and Clear hides them per member', () => {
+  const b = grouped();
+  assert.deepEqual(b.call(GUEST_A, 'session').data.notifications, [], 'missing tab = empty list');
+  b.call(ADMIN, 'updateMemberGroups', { email: GUEST_A, groups: ['Bride side'] });
+  b.call(ADMIN, 'updateEventGroup', { eventId: '1', groups: ['Bride side'] });
+  b.call(ADMIN, 'updateEvent', { eventId: '1', status: 'Live', notify: true });
+  b.call(ADMIN, 'updateEvent', { eventId: '2', status: 'Live', notify: true });
+  b.call(ADMIN, 'updateEvent', { eventId: '2', status: 'Completed', notify: true });
+  assert.deepEqual(b.sheets.Notifications.data[0], ['Timestamp', 'Title', 'Message', 'EventID', 'Groups', 'SentBy', 'PushStatus']);
+  assert.equal(b.sheets.Notifications.data.length, 3, 'one row per Live push; Completed is not announced');
+
+  const a = b.call(GUEST_A, 'session').data.notifications;
+  assert.deepEqual(a.map((n) => n.eventId), ['2', '1'], 'newest first');
+  assert.match(a[1].title, /Live now: Welcome Brunch/);
+  assert.equal(a[0].sentBy, undefined, 'guests do not see sender/push status');
+  assert.deepEqual(b.call(GUEST_B, 'session').data.notifications.map((n) => n.eventId), ['2']);
+  const adminList = b.call(ADMIN, 'session').data.notifications;
+  assert.equal(adminList.length, 2);
+  assert.equal(adminList[0].pushStatus, 'Sent');
+  assert.equal(adminList[0].sentBy, ADMIN);
+
+  const cleared = b.call(GUEST_A, 'clearNotifications');
+  assert.equal(cleared.ok, true);
+  assert.deepEqual(cleared.data.notifications, []);
+  assert.deepEqual(b.call(GUEST_A, 'session').data.notifications, [], 'clear persists across sessions/devices');
+  assert.equal(b.call(GUEST_B, 'session').data.notifications.length, 1, 'other members unaffected');
+  assert.equal(b.call('nobody@example.com', 'clearNotifications').code, 'NOT_MEMBER');
+});
+
+test('notifications: formula-like event titles are neutralised in the log', () => {
+  const b = createBackend({ overrides: { Itinerary: [['EventID', 'Day', 'Time', 'Title', 'Location', 'Status'], ['1', 'D', '', '=HYPERLINK("x")', '', 'Upcoming']] } });
+  b.call(ADMIN, 'updateEvent', { eventId: '1', status: 'Live', notify: true });
+  const row = b.sheets.Notifications.data.at(-1);
+  assert.ok(!/^[=+\-@]/.test(row[1]) && !/^[=+\-@]/.test(row[2]));
 });

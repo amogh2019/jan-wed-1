@@ -97,7 +97,7 @@
   </div>
 
   <!-- Main content (rendered by app.js) -->
-  <main id="view" tabindex="-1" class="max-w-2xl mx-auto px-4 pt-3 pb-32 focus:outline-none">
+  <main id="view" tabindex="-1" class="max-w-2xl mx-auto px-4 pt-3 pb-40 focus:outline-none">
     <div class="space-y-3" aria-hidden="true">
       <div class="skeleton h-28 rounded-2xl"></div>
       <div class="skeleton h-20 rounded-2xl"></div>
@@ -105,13 +105,18 @@
     </div>
   </main>
 
-  <!-- Bottom navigation (admins: 4 tabs; guests: Schedule + My travel) -->
+  <!-- Bottom navigation (Notifications is available to all signed-in members). -->
   <nav id="bottom-nav" aria-label="Sections" class="hidden safe-bottom fixed bottom-0 inset-x-0 z-30 bg-ivory-50/95 backdrop-blur border-t border-haldi-200 shadow-[0_-6px_20px_-12px_rgb(74_13_26/.25)]">
-    <div class="max-w-2xl mx-auto grid grid-cols-1" id="nav-grid">
+    <div class="max-w-2xl mx-auto grid grid-cols-3" id="nav-grid">
       <button type="button" data-tab="schedule" class="nav-btn flex flex-col items-center gap-0.5 pt-2 pb-1.5 text-[11px] font-semibold">
         <span class="nav-pill grid place-items-center w-14 h-8 rounded-full transition">
           <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15" rx="2.5"/><path stroke-linecap="round" d="M3.5 10h17M8 3v4M16 3v4"/></svg>
         </span>Schedule
+      </button>
+      <button type="button" data-tab="notifications" class="nav-btn flex flex-col items-center gap-0.5 pt-2 pb-1.5 text-[11px] font-semibold">
+        <span class="nav-pill grid place-items-center w-14 h-8 rounded-full transition">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M18 9a6 6 0 00-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg>
+        </span>Notices
       </button>
       <button type="button" data-tab="control" class="nav-btn admin-only hidden flex-col items-center gap-0.5 pt-2 pb-1.5 text-[11px] font-semibold">
         <span class="nav-pill grid place-items-center w-14 h-8 rounded-full transition">
@@ -138,7 +143,7 @@
 
   <!-- Modal & toast roots -->
   <div id="modal-root"></div>
-  <div id="toast-root" aria-live="polite" class="fixed z-50 inset-x-0 bottom-24 flex flex-col items-center gap-2 px-4 pointer-events-none"></div>
+  <div id="toast-root" aria-live="polite" class="fixed z-50 inset-x-0 bottom-32 flex flex-col items-center gap-2 px-4 pointer-events-none"></div>
 
   <noscript>
     <div class="p-6 text-center text-ink-600">Please enable JavaScript to open this app.</div>

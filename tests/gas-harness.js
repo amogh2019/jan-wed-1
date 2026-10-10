@@ -72,7 +72,7 @@ function createBackend({ members = [['admin@example.com', 'Admin', 'seed', '']],
       flush: () => {},
     },
     CacheService: { getScriptCache: () => ({ get: (k) => (cache.has(k) ? cache.get(k) : null), put: (k, v) => cache.set(k, v) }) },
-    PropertiesService: { getScriptProperties: () => ({ getProperty: (k) => properties[k] || null }) },
+    PropertiesService: { getScriptProperties: () => ({ getProperty: (k) => properties[k] || null, setProperty: (k, v) => { properties[k] = String(v); } }) },
     LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock: () => {} }) },
     Session: { getScriptTimeZone: () => 'UTC', getEffectiveUser: () => ({ getEmail: () => 'owner@example.com' }) },
     ContentService: {
@@ -82,6 +82,8 @@ function createBackend({ members = [['admin@example.com', 'Admin', 'seed', '']],
     Utilities: {
       DigestAlgorithm: { SHA_256: 'sha256' },
       computeDigest: (_alg, text) => [...crypto.createHash('sha256').update(String(text)).digest()].map((b) => (b > 127 ? b - 256 : b)),
+      computeHmacSha256Signature: (value, key) => [...crypto.createHmac('sha256', String(key)).update(String(value)).digest()].map((b) => (b > 127 ? b - 256 : b)),
+      getUuid: () => crypto.randomUUID(),
       base64DecodeWebSafe: (s) => Buffer.from(s, 'base64url'),
       newBlob: (bytes) => ({ getDataAsString: () => Buffer.from(bytes).toString('utf8') }),
       formatDate: (d) => new Date(d).toISOString(),
@@ -116,7 +118,7 @@ function createBackend({ members = [['admin@example.com', 'Admin', 'seed', '']],
 
   const call = (email, action, payload = {}, extra = {}) => post({ action, payload, idToken: tokenFor(email), userEmail: email, timestamp: new Date().toISOString(), ...extra });
 
-  return { sandbox, sheets, cache, fetches, tokens, tokenFor, post, call, audit: () => sheets.AuditLog.data.slice(1) };
+  return { sandbox, sheets, cache, fetches, properties, tokens, tokenFor, post, call, audit: () => sheets.AuditLog.data.slice(1) };
 }
 
 module.exports = { createBackend, makeToken, CLIENT_ID };
