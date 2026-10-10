@@ -1635,16 +1635,16 @@
                 ${groupPicker(s.groupCatalog, s.memberGroupsDrafts[m.email] ?? (m.groups || []), 'member-groups', { email: m.email }, groupsBusy)}
               </label>
               <button data-action="save-member-groups" data-email="${escapeHtml(m.email)}" ${groupsBusy ? 'disabled' : ''} ${pendingAttrs(`member-groups:${m.email}`)} class="btn btn-ghost btn-sm mt-1 min-h-[40px]">${spinnerOr(`member-groups:${m.email}`, 'Save groups')}</button>
+              <select data-action="set-role" data-email="${escapeHtml(m.email)}" aria-label="Role for ${escapeHtml(m.email)}" ${self || busy || lastAdmin ? 'disabled' : ''}
+                title="${lockReason(self, lastAdmin, 'You cannot change your own role', 'Change role')}"
+                class="shrink-0 rounded-lg border border-haldi-300 bg-ivory-50 text-xs px-2 py-1.5 disabled:opacity-50">${roleOptions(m.role)}</select>
+              ${busy ? '<span role="status" aria-label="Updating member"><span class="spinner" aria-hidden="true"></span><span class="sr-only">Updating member</span></span>' : ''}
+              <button data-action="remove-member" data-email="${escapeHtml(m.email)}" ${self || busy || lastAdmin ? 'disabled' : ''} ${pendingAttrs(`member:${m.email}`)}
+                title="${lockReason(self, lastAdmin, 'You cannot remove yourself', 'Remove member')}" aria-label="Remove ${escapeHtml(m.email)}"
+                class="btn btn-danger btn-sm shrink-0">
+                ${busy ? '<span class="spinner" aria-hidden="true"></span><span class="sr-only">Working: Remove member</span>' : 'Remove'}
+              </button>
             </div>
-            <select data-action="set-role" data-email="${escapeHtml(m.email)}" aria-label="Role for ${escapeHtml(m.email)}" ${self || busy || lastAdmin ? 'disabled' : ''}
-              title="${lockReason(self, lastAdmin, 'You cannot change your own role', 'Change role')}"
-              class="shrink-0 rounded-lg border border-haldi-300 bg-ivory-50 text-xs px-2 py-1.5 disabled:opacity-50">${roleOptions(m.role)}</select>
-            ${busy ? '<span role="status" aria-label="Updating member"><span class="spinner" aria-hidden="true"></span><span class="sr-only">Updating member</span></span>' : ''}
-            <button data-action="remove-member" data-email="${escapeHtml(m.email)}" ${self || busy || lastAdmin ? 'disabled' : ''} ${pendingAttrs(`member:${m.email}`)}
-              title="${lockReason(self, lastAdmin, 'You cannot remove yourself', 'Remove member')}" aria-label="Remove ${escapeHtml(m.email)}"
-              class="btn btn-danger btn-sm shrink-0">
-              ${busy ? '<span class="spinner" aria-hidden="true"></span><span class="sr-only">Working: Remove member</span>' : 'Remove'}
-            </button>
           </li>`;
         }).join('')}
       </ul>`;
