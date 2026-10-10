@@ -319,37 +319,6 @@ var ACTIONS_ = {
   },
 
   /**
-   * Deletes one ceremony row and shifts the numeric IDs of the rows below it down by one
-   * (e.g. deleting 3 turns 4→3, 5→4). The client must send the title it saw, so a stale
-   * screen can never delete a different ceremony after IDs have shifted.
-   */
-  deleteEvent: function (payload, user, req) {
-    var eventId = requireString_(payload.eventId, 'eventId');
-    var table = readTable_(SHEETS.ITINERARY);
-    var row = findRow_(table, 'EventID', eventId);
-    if (!row) throw new AppError('NOT_FOUND', 'Event ' + eventId + ' not found.');
-    assertSameEvent_(row, requireString_(payload.title, 'title'));
-
-    var renumbered = planEventRenumber_(table, row);
-    // IDs are rewritten before the delete so every rowIndex is still valid.
-    renumbered.forEach(function (r) { setCell_(table, r.row, 'EventID', r.to); });
-    table.sheet.deleteRow(row.rowIndex);
-
-    var title = String(row.values.Title || '').trim();
-    var details = 'Deleted Event ' + eventId + ' ("' + title + '", was ' + (String(row.values.Status || '').trim() || 'Upcoming') + ')';
-    if (renumbered.length) {
-      details += '; renumbered ' + renumbered.map(function (r) { return r.from + '→' + r.to; }).join(', ');
-    }
-    writeAudit_(user.email, AUDIT_CATEGORY.EVENT, details, req.timestamp);
-
-    return {
-      eventId: eventId,
-      renumbered: renumbered.map(function (r) { return { from: r.from, to: String(r.to) }; }),
-      itinerary: refreshItineraryCache_(),
-    };
-  },
-
-  /**
    * Deletes a ceremony row, then shifts the numeric EventIDs of the rows below it down by one
    * (e.g. deleting 3 turns 4→3, 5→4) so the schedule stays 1..N. `title` (when sent) must match,
    * so a stale screen can never delete a different, already-renumbered event.
@@ -816,41 +785,6 @@ function assertSameEvent_(row, expectedTitle) {
   if (String(row.values.Title || '').trim() !== String(expectedTitle).trim()) {
     throw new AppError('CONFLICT', 'The schedule changed since you opened it. Please refresh and try again.');
   }
-}
-
-/**
- * For rows below `deleted` whose ID has the same prefix and a higher number, returns the ID each
- * moves to (number − 1). Returns [] (IDs left as they are) if the IDs aren't a simple sequence and
- * shifting would create a duplicate.
- */
-function planEventRenumber_(table, deleted) {
-  var m = /^(\D*)(\d+)$/.exec(String(deleted.values.EventID).trim());
-  if (!m) return [];
-  var prefix = m[1];
-  var deletedNum = Number(m[2]);
-  var plan = [];
-  table.rows.forEach(function (r) {
-    if (r.rowIndex <= deleted.rowIndex) return;
-    var id = String(r.values.EventID == null ? '' : r.values.EventID).trim();
-    var rm = /^(\D*)(\d+)$/.exec(id);
-    if (!rm || rm[1] !== prefix || Number(rm[2]) <= deletedNum) return;
-    var n = Number(rm[2]) - 1;
-    plan.push({ row: r, from: id, to: prefix ? prefix + n : n });
-  });
-  var moving = {};
-  plan.forEach(function (p) { moving[p.row.rowIndex] = true; });
-  var finalIds = {};
-  table.rows.forEach(function (r) {
-    if (r.rowIndex === deleted.rowIndex || moving[r.rowIndex]) return;
-    var id = String(r.values.EventID == null ? '' : r.values.EventID).trim();
-    if (id) finalIds[id.toLowerCase()] = true;
-  });
-  for (var i = 0; i < plan.length; i++) {
-    var key = String(plan[i].to).toLowerCase();
-    if (finalIds[key]) return [];
-    finalIds[key] = true;
-  }
-  return plan;
 }
 
 /**
