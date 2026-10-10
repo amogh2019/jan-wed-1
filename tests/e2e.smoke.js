@@ -73,6 +73,13 @@ function makeBackend() {
         itinerary.push({ id: String(itinerary.length + 1), day: p.day, time: p.time, title: p.title, location: p.location, mapLink: p.mapLink, status: 'Upcoming' });
         return { ok: true, data: { itinerary } };
       }
+      if (body.action === 'deleteEvent') {
+        const i = itinerary.findIndex((e) => e.id === p.eventId && e.title === p.title);
+        if (i < 0) return { ok: false, code: 'CONFLICT', error: 'The schedule changed.' };
+        itinerary.splice(i, 1);
+        itinerary.forEach((e, n) => { e.id = String(n + 1); });
+        return { ok: true, data: { itinerary } };
+      }
       if (body.action === 'addPickup') {
         logistics.push({ id: `G${logistics.length + 1}`, name: p.name, members: p.members, contact: p.contact, email: p.email, arrival: '', departure: '', mode: p.mode, pickupStatus: p.pickupStatus, dropStatus: 'Pending' });
         return { ok: true, data: { logistics } };
@@ -227,6 +234,10 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     assert(backend.itinerary.some((e) => e.title === 'Haldi' && e.day === 'Sat, Jan 23' && e.time === '7:05 PM' && e.mapLink === 'https://maps.app.goo.gl/abc123'), 'event created with day label, 12h time and map link');
     assert(!(await page.$('#modal-root [role="dialog"]')), 'create modal closed');
 
+    await page.click('[data-action="delete-event"][data-id="1"]');
+    await page.waitForSelector('#view >> text=Welcome', { state: 'detached' });
+    assert(!backend.itinerary.some((e) => e.title === 'Welcome') && backend.itinerary.find((e) => e.title === 'Haldi').id === '1', 'event deleted and later IDs shifted');
+
     await page.click('[data-tab="pickups"]');
     await page.click('[data-action="add-pickup"]');
     await page.click('#modal-root [data-modal="confirm"]');
@@ -272,7 +283,7 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     await page.waitForFunction(() => !document.querySelector('button[data-email="viewer@gmail.com"]'));
     assert(!backend.members.some((m) => m.email === 'viewer@gmail.com'), 'member removed');
 
-    assert(backend.audit.length === 7 && backend.audit.every((a) => a.startsWith('admin@gmail.com|') && /\|\d{4}-\d\d-\d\dT/.test(a)),
+    assert(backend.audit.length === 8 && backend.audit.every((a) => a.startsWith('admin@gmail.com|') && /\|\d{4}-\d\d-\d\dT/.test(a)),
       'every admin call carried userEmail + timestamp');
 
     console.log('Welcome plays again every time the app is opened');

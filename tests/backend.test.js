@@ -72,7 +72,7 @@ test('admin session includes logistics and members', () => {
 
 test('viewers cannot run admin actions and the attempt is audited', () => {
   const b = withViewer();
-  for (const action of ['updateEvent', 'updatePickup', 'addEvent', 'addPickup', 'addMember', 'updateMemberRole', 'removeMember', 'addAdmin']) {
+  for (const action of ['updateEvent', 'updatePickup', 'addEvent', 'addPickup', 'addMember', 'updateMemberRole', 'removeMember', 'addAdmin', 'deleteEvent']) {
     assert.equal(b.call(VIEWER, action, { eventId: '1', status: 'Live', email: 'x@example.com' }).code, 'FORBIDDEN');
   }
   assert.ok(b.audit().every((r) => r[2] === 'Security' && r[1] === VIEWER));
@@ -342,6 +342,38 @@ test('addEvent: appends an Upcoming event with the next ID, in the sheet\'s colu
   assert.equal(out.data.itinerary.at(-1).title, 'Sangeet');
   assert.equal(b.fetches.filter((f) => f.url.includes('onesignal')).length, 0, 'creating never pushes');
   assert.deepEqual([...b.audit().at(-1).slice(1, 4)], [ADMIN, 'Event', 'Added Event 8 ("Sangeet") on Day 2 at 7:30 PM @ Hall']);
+});
+
+test('deleteEvent: removes the row, shifts later IDs down, keeps other columns, audited', () => {
+  const b = createBackend({ overrides: { Itinerary: [
+    ['EventID', 'Day', 'Time', 'Title', 'Location', 'Status', 'Notes'],
+    ['1', 'Day 1', '9:00 AM', 'Haldi', 'Lawn', 'Completed', 'a'],
+    ['2', 'Day 1', '7:00 PM', 'Mehendi', 'Hall', 'Live', 'b'],
+    ['3', 'Day 2', '7:00 PM', 'Sangeet', 'Hall', 'Upcoming', 'c'],
+    ['4', 'Day 3', '10:00 AM', 'Wedding', 'Temple', 'Upcoming', 'd'],
+  ] } });
+  const out = b.call(ADMIN, 'deleteEvent', { eventId: '2', title: 'Mehendi' });
+  assert.equal(out.ok, true);
+  assert.deepEqual(b.sheets.Itinerary.data.slice(1).map((r) => [r[0], r[3], r[6]]), [['1', 'Haldi', 'a'], ['2', 'Sangeet', 'c'], ['3', 'Wedding', 'd']]);
+  assert.deepEqual(out.data.itinerary.map((e) => e.id), ['1', '2', '3']);
+  assert.deepEqual([...b.audit().at(-1).slice(1, 4)], [ADMIN, 'Event', 'Deleted Event 2 ("Mehendi") [Live]; renumbered 3→2, 4→3']);
+  assert.equal(b.call(ADMIN, 'addEvent', { title: 'Reception', day: 'Day 3' }).data.eventId, '4', 'next ID follows the shifted schedule');
+});
+
+test('deleteEvent: guards stale screens, missing events, and out-of-order IDs', () => {
+  const b = createBackend({ overrides: { Itinerary: [
+    ['EventID', 'Day', 'Time', 'Title', 'Location', 'Status'],
+    ['2', 'Day 1', '', 'A', '', 'Upcoming'],
+    ['1', 'Day 1', '', 'B', '', 'Upcoming'],
+    ['3', 'Day 1', '', 'C', '', 'Upcoming'],
+  ] } });
+  assert.equal(b.call(ADMIN, 'deleteEvent', { eventId: '9' }).code, 'NOT_FOUND');
+  assert.equal(b.call(ADMIN, 'deleteEvent', { eventId: '1', title: 'Wrong' }).code, 'CONFLICT');
+  assert.equal(b.sheets.Itinerary.data.length, 4, 'nothing deleted on conflict');
+  const out = b.call(ADMIN, 'deleteEvent', { eventId: '1', title: 'B' });
+  assert.equal(out.ok, true);
+  assert.deepEqual(b.sheets.Itinerary.data.slice(1).map((r) => r[0]), ['2', '3'], '3→2 would collide with the 2 above, so IDs are left alone');
+  assert.deepEqual(out.data.renumbered, []);
 });
 
 test('addEvent: validates input and neutralises formulas', () => {

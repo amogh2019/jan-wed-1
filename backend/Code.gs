@@ -267,6 +267,7 @@ var ACTIONS_ = {
     var table = readTable_(SHEETS.ITINERARY);
     var row = findRow_(table, 'EventID', eventId);
     if (!row) throw new AppError('NOT_FOUND', 'Event ' + eventId + ' not found.');
+    assertSameEvent_(row, payload.title);
 
     var previous = String(row.values.Status || '');
     setCell_(table, row, 'Status', status);
@@ -315,6 +316,74 @@ var ACTIONS_ = {
       writeAudit_(user.email, AUDIT_CATEGORY.LOGISTICS, 'Updated ' + input.name + ' (ID ' + id + '): ' + changed.join(', '), req.timestamp);
     }
     return { id: id, changed: changed, logistics: readLogistics_() };
+  },
+
+  /**
+   * Deletes one ceremony row and shifts the numeric IDs of the rows below it down by one
+   * (e.g. deleting 3 turns 4→3, 5→4). The client must send the title it saw, so a stale
+   * screen can never delete a different ceremony after IDs have shifted.
+   */
+  deleteEvent: function (payload, user, req) {
+    var eventId = requireString_(payload.eventId, 'eventId');
+    var table = readTable_(SHEETS.ITINERARY);
+    var row = findRow_(table, 'EventID', eventId);
+    if (!row) throw new AppError('NOT_FOUND', 'Event ' + eventId + ' not found.');
+    assertSameEvent_(row, requireString_(payload.title, 'title'));
+
+    var renumbered = planEventRenumber_(table, row);
+    // IDs are rewritten before the delete so every rowIndex is still valid.
+    renumbered.forEach(function (r) { setCell_(table, r.row, 'EventID', r.to); });
+    table.sheet.deleteRow(row.rowIndex);
+
+    var title = String(row.values.Title || '').trim();
+    var details = 'Deleted Event ' + eventId + ' ("' + title + '", was ' + (String(row.values.Status || '').trim() || 'Upcoming') + ')';
+    if (renumbered.length) {
+      details += '; renumbered ' + renumbered.map(function (r) { return r.from + '→' + r.to; }).join(', ');
+    }
+    writeAudit_(user.email, AUDIT_CATEGORY.EVENT, details, req.timestamp);
+
+    return {
+      eventId: eventId,
+      renumbered: renumbered.map(function (r) { return { from: r.from, to: String(r.to) }; }),
+      itinerary: refreshItineraryCache_(),
+    };
+  },
+
+  /**
+   * Deletes a ceremony row, then shifts the numeric EventIDs of the rows below it down by one
+   * (e.g. deleting 3 turns 4→3, 5→4) so the schedule stays 1..N. `title` (when sent) must match,
+   * so a stale screen can never delete a different, already-renumbered event.
+   */
+  deleteEvent: function (payload, user, req) {
+    var eventId = requireString_(payload.eventId, 'eventId');
+    var table = readTable_(SHEETS.ITINERARY);
+    var row = findRow_(table, 'EventID', eventId);
+    if (!row) throw new AppError('NOT_FOUND', 'Event ' + eventId + ' not found. Refresh and try again.');
+    var title = String(row.values.Title || '').trim();
+    if (payload.title != null && String(payload.title).trim() !== title) {
+      throw new AppError('CONFLICT', 'The schedule changed since you opened it. Refresh and try again.');
+    }
+
+    var renumber = planEventRenumber_(table, row);
+    table.sheet.deleteRow(row.rowIndex);
+    // Rows below the deleted one moved up by one; address them by position, not by ID,
+    // because IDs are being rewritten as we go.
+    renumber.forEach(function (change) {
+      setCell_(table, { rowIndex: change.row.rowIndex - 1, values: change.row.values }, 'EventID', change.to);
+    });
+
+    var details = 'Deleted Event ' + eventId + ' ("' + title + '")' +
+      (row.values.Status ? ' [' + String(row.values.Status).trim() + ']' : '');
+    if (renumber.length) {
+      details += '; renumbered ' + renumber.map(function (c) { return c.from + '→' + c.to; }).join(', ');
+    }
+    writeAudit_(user.email, AUDIT_CATEGORY.EVENT, details, req.timestamp);
+
+    return {
+      deletedId: eventId,
+      renumbered: renumber.map(function (c) { return { from: c.from, to: c.to }; }),
+      itinerary: refreshItineraryCache_(),
+    };
   },
 
   addEvent: function (payload, user, req) {
@@ -739,6 +808,82 @@ function readTable_(name) {
     rows.push({ rowIndex: i + 1, values: obj });
   }
   return { sheet: sheet, headers: headers, rows: rows };
+}
+
+/** Guards ID-based event actions: the row must still hold the ceremony the admin was looking at. */
+function assertSameEvent_(row, expectedTitle) {
+  if (expectedTitle == null || String(expectedTitle).trim() === '') return;
+  if (String(row.values.Title || '').trim() !== String(expectedTitle).trim()) {
+    throw new AppError('CONFLICT', 'The schedule changed since you opened it. Please refresh and try again.');
+  }
+}
+
+/**
+ * For rows below `deleted` whose ID has the same prefix and a higher number, returns the ID each
+ * moves to (number − 1). Returns [] (IDs left as they are) if the IDs aren't a simple sequence and
+ * shifting would create a duplicate.
+ */
+function planEventRenumber_(table, deleted) {
+  var m = /^(\D*)(\d+)$/.exec(String(deleted.values.EventID).trim());
+  if (!m) return [];
+  var prefix = m[1];
+  var deletedNum = Number(m[2]);
+  var plan = [];
+  table.rows.forEach(function (r) {
+    if (r.rowIndex <= deleted.rowIndex) return;
+    var id = String(r.values.EventID == null ? '' : r.values.EventID).trim();
+    var rm = /^(\D*)(\d+)$/.exec(id);
+    if (!rm || rm[1] !== prefix || Number(rm[2]) <= deletedNum) return;
+    var n = Number(rm[2]) - 1;
+    plan.push({ row: r, from: id, to: prefix ? prefix + n : n });
+  });
+  var moving = {};
+  plan.forEach(function (p) { moving[p.row.rowIndex] = true; });
+  var finalIds = {};
+  table.rows.forEach(function (r) {
+    if (r.rowIndex === deleted.rowIndex || moving[r.rowIndex]) return;
+    var id = String(r.values.EventID == null ? '' : r.values.EventID).trim();
+    if (id) finalIds[id.toLowerCase()] = true;
+  });
+  for (var i = 0; i < plan.length; i++) {
+    var key = String(plan[i].to).toLowerCase();
+    if (finalIds[key]) return [];
+    finalIds[key] = true;
+  }
+  return plan;
+}
+
+/**
+ * IDs to shift after deleting `deleted`: every row below it whose ID is "<prefix><n>" with
+ * n greater than the deleted number moves to n-1. If any shift would collide with an ID that
+ * stays (a hand-edited, out-of-order sheet), nothing is renumbered — deleting stays safe.
+ */
+function planEventRenumber_(table, deleted) {
+  var m = /^(\D*)(\d+)$/.exec(String(deleted.values.EventID).trim());
+  if (!m) return [];
+  var prefix = m[1];
+  var gone = Number(m[2]);
+  var changes = [];
+  var staying = {};
+  table.rows.forEach(function (r) {
+    if (r === deleted) return;
+    var id = String(r.values.EventID == null ? '' : r.values.EventID).trim();
+    if (!id) return;
+    var n = /^(\D*)(\d+)$/.exec(id);
+    if (r.rowIndex > deleted.rowIndex && n && n[1] === prefix && Number(n[2]) > gone) {
+      changes.push({ row: r, from: id, to: prefix + (Number(n[2]) - 1) });
+    } else {
+      staying[id.toLowerCase()] = true;
+    }
+  });
+  var targets = {};
+  var clash = changes.some(function (c) {
+    var key = c.to.toLowerCase();
+    if (staying[key] || targets[key]) return true;
+    targets[key] = true;
+    return false;
+  });
+  return clash ? [] : changes;
 }
 
 /** Next free ID: highest trailing number + 1, keeping the prefix the sheet already uses (e.g. G7 → G8). */

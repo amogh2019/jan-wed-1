@@ -1174,6 +1174,8 @@
               <select data-action="set-status" data-id="${escapeHtml(e.id)}" aria-label="Change status of ${escapeHtml(e.title)}" ${busy ? 'disabled' : ''} class="input py-2 text-sm">
                 ${['Upcoming', 'Live', 'Completed'].map((st) => `<option value="${st}" ${st === e.status ? 'selected' : ''}>${st}</option>`).join('')}
               </select>
+              <button data-action="delete-event" data-id="${escapeHtml(e.id)}" ${busy ? 'disabled' : ''} aria-label="Delete ${escapeHtml(e.title)}"
+                class="btn btn-ghost btn-sm col-span-2 min-h-[44px] text-kumkum-700">🗑 Delete ceremony</button>
             </div>
           </article>`;
         }).join('')}
@@ -1573,6 +1575,20 @@
       }
     },
 
+    async deleteEvent(eventId) {
+      const ev = findEvent(eventId);
+      if (!ev) return;
+      const later = Store.state.itinerary.filter((e) => /^\d+$/.test(e.id) && /^\d+$/.test(ev.id) && Number(e.id) > Number(ev.id)).length;
+      const warn = [
+        `Delete “${ev.title}” (#${ev.id})? This removes it from the schedule for everyone.`,
+        ev.status === 'Live' ? '\nIt is LIVE right now.' : '',
+        later ? `\nThe ${later} ceremon${later === 1 ? 'y' : 'ies'} after it will be renumbered.` : '',
+      ].join('');
+      if (!window.confirm(warn)) return;
+      const data = await this.run(`event:${eventId}`, () => Api.post('deleteEvent', { eventId, title: ev.title }), `“${ev.title}” deleted`);
+      if (data) Store.set({ itinerary: data.itinerary });
+    },
+
     async updateEvent(eventId, status, notify) {
       const data = await this.run(`event:${eventId}`, () => Api.post('updateEvent', { eventId, status, notify }));
       if (!data) return;
@@ -1871,6 +1887,7 @@
         case 'refresh': void Data.refresh(); break;
         case 'open-broadcast': Actions.openBroadcast(id); break;
         case 'add-event': Actions.openAddEvent(); break;
+        case 'delete-event': void Actions.deleteEvent(id); break;
         case 'add-pickup': Actions.openTravelForm(); break;
         case 'edit-pickup': Actions.openEditTravel(id); break;
         case 'logistics-mode': Store.set({ logisticsMode: el.dataset.value === 'drop' ? 'drop' : 'pickup', pickupFilter: 'all' }); break;
