@@ -112,6 +112,8 @@ Checklist:
 - Deploy the web app as *Execute as: Me*, *Access: Anyone*.
 - Before committing, run: `grep -rn "REST_API_KEY\|private_key\|secret" --exclude-dir=node_modules .`
 
+**CSP (in `index.html`).** No wildcard hosts: Google profile photos are limited to `lh3`–`lh6.googleusercontent.com` (also enforced by `safePicture`), and OneSignal to `onesignal.com`/`api.onesignal.com`. `script-src` never allows `'unsafe-inline'`. `style-src` keeps `'unsafe-inline'` deliberately: the Google and OneSignal SDKs inject inline styles, and the progress bars use `style="width:%"`. Styles cannot run script and all user data is escaped, so this is an accepted Sonar hotspot. If you add a new third-party host, add it explicitly. The service worker only accepts `postMessage` from its own origin.
+
 ## 7. Run, test, deploy
 
 ```bash
@@ -141,3 +143,5 @@ Deploy:
 - **v1.1** Mandatory login; `Members` tab with Admin/Viewer roles; Members management tab; hardened backend (token verify, rate limit, locks, injection guard).
 - **v1.2** Festive Hindu celebration theme and professional UX pass.
 - **v1.3** Ganesh Vandana welcome splash, warm nudges, one-time guided tour tracked in `Members.TourStatus`; non-destructive `setup()` with column append and blank-only backfill; this guide.
+- **v1.3.1** SonarJS static-analysis cleanup (0 issues): split `doPost` into `authenticate_` / `resolveAction_` / `runLocked_`, split `render()` and `loadSession()` into helpers, removed nested ternaries/templates, crypto-based randomness for petals, linear-time base-path parsing, explicit NaN-safe token expiry check. No behaviour change.
+- **v1.3.2** Second Sonar/unicorn pass: `node:` imports, `replaceAll`/`codePointAt`/`dataset`/`Set.has`, braces on one-line loops in tests, locale-aware sort; CSP wildcards removed; service-worker message origin check; offline banner is an `<output>` element.

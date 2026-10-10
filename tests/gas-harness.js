@@ -1,8 +1,8 @@
 /* Loads backend/Code.gs into a Node vm with in-memory mocks of the Apps Script services. */
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
-const crypto = require('crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const crypto = require('node:crypto');
 
 const CLIENT_ID = 'test-client.apps.googleusercontent.com';
 const b64url = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64url');
@@ -17,11 +17,11 @@ function makeSheet(name, rows) {
   const width = () => data.reduce((m, r) => Math.max(m, r.length), 0);
   const sheet = {
     name, data, validations: {}, frozen: 0,
-    getDataRange: () => ({ getValues: () => data.map((r) => { const o = r.slice(); while (o.length < width()) o.push(''); return o.map((v) => (v === undefined ? '' : v)); }) }),
+    getDataRange: () => ({ getValues: () => data.map((r) => { const o = r.slice(); while (o.length < width()) { o.push(''); } return o.map((v) => (v === undefined ? '' : v)); }) }),
     getRange: (r, c, nr = 1, nc = 1) => {
       const range = {
-        setValue: (v) => { while (data.length < r) data.push([]); data[r - 1][c - 1] = v; return range; },
-        setValues: (vals) => { vals.forEach((row, i) => row.forEach((v, j) => { while (data.length < r + i) data.push([]); data[r - 1 + i][c - 1 + j] = v; })); return range; },
+        setValue: (v) => { while (data.length < r) { data.push([]); } data[r - 1][c - 1] = v; return range; },
+        setValues: (vals) => { vals.forEach((row, i) => row.forEach((v, j) => { while (data.length < r + i) { data.push([]); } data[r - 1 + i][c - 1 + j] = v; })); return range; },
         getValues: () => Array.from({ length: nr }, (_, i) => Array.from({ length: nc }, (_, j) => { const v = (data[r - 1 + i] || [])[c - 1 + j]; return v === undefined ? '' : v; })),
         setFontWeight: () => range,
         setDataValidation: (rule) => { sheet.validations[c] = rule; return range; },
@@ -97,7 +97,8 @@ function createBackend({ members = [['admin@example.com', 'Admin', 'seed', '']],
     },
   };
   vm.createContext(sandbox);
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'backend', 'Code.gs'), 'utf8'), sandbox, { filename: 'Code.gs' });
+  // Test-only: loads our own backend/Code.gs into an isolated sandbox (never user input).
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'backend', 'Code.gs'), 'utf8'), sandbox, { filename: 'Code.gs' }); // eslint-disable-line sonarjs/code-eval -- NOSONAR
 
   const tokenFor = (email, opts) => {
     const { token, claims } = makeToken(email, opts);

@@ -92,53 +92,71 @@ function doGet() {
 function doPost(e) {
   try {
     var req = parseRequest_(e);
-    var user = verifyIdToken_(req.idToken);
-    enforceRateLimit_(user.email);
-
-    if (req.userEmail != null && normalizeEmail_(req.userEmail) !== user.email) {
-      throw new AppError('FORBIDDEN', 'Identity mismatch between request and token.');
-    }
-
-    var member = getMember_(user.email);
-    if (!member) {
-      throw new AppError('NOT_MEMBER', 'This Google account is not on the guest list. Ask an organiser to add you.');
-    }
-    user.role = member.role;
-    var admin = member.role === ROLES.ADMIN;
+    var user = authenticate_(req);
+    var admin = user.role === ROLES.ADMIN;
 
     if (req.action === 'session') return jsonOut_({ ok: true, data: buildSession_(user, admin) });
 
-    var memberAction = Object.prototype.hasOwnProperty.call(MEMBER_ACTIONS_, req.action);
-    if (!memberAction && !Object.prototype.hasOwnProperty.call(ACTIONS_, req.action)) {
-      throw new AppError('BAD_REQUEST', 'Unknown action.');
-    }
-    if (!memberAction && !admin) {
-      writeAudit_(user.email, AUDIT_CATEGORY.SECURITY, 'Denied admin action "' + req.action + '" for Viewer');
-      throw new AppError('FORBIDDEN', 'You are not authorized to perform admin actions.');
-    }
-
+    var memberAction = resolveAction_(req.action, user, admin);
     var handler = memberAction ? MEMBER_ACTIONS_[req.action] : ACTIONS_[req.action];
-
-    var lock = LockService.getScriptLock();
-    if (!lock.tryLock(LOCK_TIMEOUT_MS)) throw new AppError('BUSY', 'Server is busy, please retry.');
-    var result;
-    try {
-      // Re-check the caller under the lock: a request queued before the caller
-      // was removed/demoted must not run with stale privileges.
-      var current = getMember_(user.email);
-      if (!current || (!memberAction && current.role !== ROLES.ADMIN)) {
-        writeAudit_(user.email, AUDIT_CATEGORY.SECURITY, 'Denied queued action "' + req.action + '" after access change');
-        throw new AppError(current ? 'FORBIDDEN' : 'NOT_MEMBER', current ? 'You are not authorized to perform admin actions.' : 'This Google account is not on the guest list.');
-      }
-      user.role = current.role;
-      result = handler(req.payload || {}, user, req);
-      SpreadsheetApp.flush();
-    } finally {
-      lock.releaseLock();
-    }
-    return jsonOut_({ ok: true, data: result });
+    return jsonOut_({ ok: true, data: runLocked_(handler, memberAction, user, req) });
   } catch (err) {
     return errorOut_(err);
+  }
+}
+
+/** Verifies the ID token, rate limit, claimed identity and Members membership. Returns the user with role. */
+function authenticate_(req) {
+  var user = verifyIdToken_(req.idToken);
+  enforceRateLimit_(user.email);
+
+  if (req.userEmail != null && normalizeEmail_(req.userEmail) !== user.email) {
+    throw new AppError('FORBIDDEN', 'Identity mismatch between request and token.');
+  }
+
+  var member = getMember_(user.email);
+  if (!member) {
+    throw new AppError('NOT_MEMBER', 'This Google account is not on the guest list. Ask an organiser to add you.');
+  }
+  user.role = member.role;
+  return user;
+}
+
+/** Validates the action name and admin rights. Returns true for member (non-admin) actions. */
+function resolveAction_(action, user, admin) {
+  var memberAction = Object.prototype.hasOwnProperty.call(MEMBER_ACTIONS_, action);
+  if (!memberAction && !Object.prototype.hasOwnProperty.call(ACTIONS_, action)) {
+    throw new AppError('BAD_REQUEST', 'Unknown action.');
+  }
+  if (!memberAction && !admin) {
+    writeAudit_(user.email, AUDIT_CATEGORY.SECURITY, 'Denied admin action "' + action + '" for Viewer');
+    throw new AppError('FORBIDDEN', 'You are not authorized to perform admin actions.');
+  }
+  return memberAction;
+}
+
+/** Runs a handler under the script lock, re-checking the caller's access first. */
+function runLocked_(handler, memberAction, user, req) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(LOCK_TIMEOUT_MS)) throw new AppError('BUSY', 'Server is busy, please retry.');
+  try {
+    // Re-check the caller under the lock: a request queued before the caller
+    // was removed/demoted must not run with stale privileges.
+    var current = getMember_(user.email);
+    if (!current) {
+      writeAudit_(user.email, AUDIT_CATEGORY.SECURITY, 'Denied queued action "' + req.action + '" after access change');
+      throw new AppError('NOT_MEMBER', 'This Google account is not on the guest list.');
+    }
+    if (!memberAction && current.role !== ROLES.ADMIN) {
+      writeAudit_(user.email, AUDIT_CATEGORY.SECURITY, 'Denied queued action "' + req.action + '" after access change');
+      throw new AppError('FORBIDDEN', 'You are not authorized to perform admin actions.');
+    }
+    user.role = current.role;
+    var result = handler(req.payload || {}, user, req);
+    SpreadsheetApp.flush();
+    return result;
+  } finally {
+    lock.releaseLock();
   }
 }
 
@@ -304,11 +322,14 @@ function precheckIdToken_(idToken, clientId) {
     var seg = idToken.split('.')[1];
     seg += new Array((4 - (seg.length % 4)) % 4 + 1).join('=');
     claims = JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(seg)).getDataAsString());
-  } catch (err) {
-    claims = null;
+  } catch {
+    // Undecodable payload: reject without echoing parser details back to the client.
+    throw new AppError('AUTH_INVALID', 'Invalid sign-in token.');
   }
   if (!claims || claims.aud !== clientId) throw new AppError('AUTH_INVALID', 'Invalid sign-in token.');
-  if (!(Number(claims.exp) * 1000 > Date.now())) throw new AppError('AUTH_EXPIRED', 'Your sign-in has expired. Please sign in again.');
+  var expMs = Number(claims.exp) * 1000;
+  // Missing/NaN exp counts as expired.
+  if (!Number.isFinite(expMs) || expMs <= Date.now()) throw new AppError('AUTH_EXPIRED', 'Your sign-in has expired. Please sign in again.');
 }
 
 function verifyIdToken_(idToken) {
@@ -544,7 +565,7 @@ function setCell_(table, row, column, value) {
 
 function canonicalHeader_(h, known) {
   var s = String(h == null ? '' : h).trim();
-  var lower = s.toLowerCase().replace(/\s+/g, '');
+  var lower = s.toLowerCase().split(/\s+/).join('');
   for (var i = 0; i < known.length; i++) {
     if (known[i].toLowerCase() === lower) return known[i];
   }

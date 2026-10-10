@@ -1,8 +1,8 @@
 // E2E smoke test with mocked Google Identity, OneSignal and Apps Script backend.
-const { chromium } = require('playwright-core');
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
+const { chromium } = require('@playwright/test');
+const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const ROOT = process.argv[2] || path.join(__dirname, '..');
 const PORT = 8765;
@@ -64,7 +64,10 @@ function makeBackend() {
   };
 }
 
-const assert = (cond, msg) => { if (!cond) throw new Error(`FAIL: ${msg}`); console.log(`  ✓ ${msg}`); };
+const assert = (cond, msg) => {
+  if (!cond) throw new Error(`FAIL: ${msg}`);
+  console.log(`  ✓ ${msg}`);
+};
 
 async function newPage(browser, backend) {
   const ctx = await browser.newContext({ serviceWorkers: 'block' });
@@ -81,7 +84,7 @@ async function newPage(browser, backend) {
   await page.route('https://script.google.com/**', async (r) => {
     const body = JSON.parse(r.request().postData());
     if (backend.delayMs) await new Promise((res) => setTimeout(res, backend.delayMs));
-    r.fulfill({ body: JSON.stringify(backend.handle(body)), contentType: 'application/json' });
+    await r.fulfill({ body: JSON.stringify(backend.handle(body)), contentType: 'application/json' });
   });
   await page.goto(`http://localhost:${PORT}/index.html`);
   return page;
@@ -135,6 +138,8 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     assert(await page.isVisible('#welcome-title'), 'splash greets the guest by name');
     await enter(page);
     await page.waitForSelector('text=Namaste');
+    const bar = await page.$eval('[data-progress]', (e) => ({ want: `${e.dataset.progress}%`, got: e.style.width }));
+    assert(bar.got === bar.want, 'progress bar width applied without inline style attributes');
 
     console.log('One-time guided tour');
     await page.waitForSelector('#tour-root [data-tour="card"]');
@@ -155,7 +160,7 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     assert(await page.evaluate(() => !localStorage.getItem('evt.credential') && !!sessionStorage.getItem('evt.credential')),
       'ID token kept in sessionStorage only');
     assert(await page.evaluate(() => !/eyJ|idToken/.test(JSON.stringify(localStorage))), 'no token material in localStorage');
-    assert(await page.evaluate(() => Object.keys(window.EventApp).sort().join() === 'WhatsApp,decodeJwt,escapeHtml,safePicture'),
+    assert(await page.evaluate(() => Object.keys(window.EventApp).sort((a, b) => a.localeCompare(b)).join() === 'decodeJwt,escapeHtml,safePicture,WhatsApp'),
       'no app state exposed on window');
     assert((await page.evaluate(() => window.__cspViolations)).length === 0, 'no CSP violations');
 

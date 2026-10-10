@@ -7,7 +7,7 @@ try {
   // Offline or OneSignal unreachable: keep the app shell working without push.
 }
 
-const CACHE_VERSION = 'v1.3.0';
+const CACHE_VERSION = 'v1.3.3';
 const SHELL_CACHE = `event-shell-${CACHE_VERSION}`;
 
 const APP_SHELL = [
@@ -17,6 +17,7 @@ const APP_SHELL = [
   './config.js',
   './styles.css',
   './manifest.json',
+  './icons/icon-80.png',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/apple-touch-icon.png',
@@ -99,7 +100,7 @@ async function staleWhileRevalidate(request, cacheName) {
   const cached = await cache.match(request, { ignoreSearch: true });
   const network = fetch(request)
     .then((res) => {
-      if (res && res.ok && res.type === 'basic') cache.put(request, res.clone());
+      if (res?.ok && res.type === 'basic') cache.put(request, res.clone());
       return res;
     })
     .catch(() => cached);
@@ -107,5 +108,7 @@ async function staleWhileRevalidate(request, cacheName) {
 }
 
 self.addEventListener('message', (event) => {
+  // Only our own pages may control the worker.
+  if (event.origin !== self.location.origin) return;
   if (event.data === 'SKIP_WAITING') self.skipWaiting();
 });

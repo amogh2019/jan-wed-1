@@ -8,10 +8,10 @@
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'self';
     script-src 'self' https://accounts.google.com/gsi/client https://cdn.onesignal.com https://onesignal.com;
-    style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style https://onesignal.com https://cdn.onesignal.com;
-    img-src 'self' data: https://*.googleusercontent.com https://onesignal.com https://img.onesignal.com;
+    style-src 'self' https://accounts.google.com/gsi/style https://onesignal.com https://cdn.onesignal.com;
+    img-src 'self' data: https://lh3.googleusercontent.com https://lh4.googleusercontent.com https://lh5.googleusercontent.com https://lh6.googleusercontent.com https://onesignal.com https://img.onesignal.com;
     font-src 'self' https://onesignal.com;
-    connect-src 'self' https://script.google.com https://script.googleusercontent.com https://accounts.google.com/gsi/ https://onesignal.com https://*.onesignal.com;
+    connect-src 'self' https://script.google.com https://script.googleusercontent.com https://accounts.google.com/gsi/ https://onesignal.com https://api.onesignal.com;
     frame-src https://accounts.google.com/gsi/ https://onesignal.com;
     worker-src 'self';
     manifest-src 'self';
@@ -49,7 +49,7 @@
   <header class="safe-top sticky top-0 z-30 text-white">
     <div class="header-silk shadow-lg">
       <div class="max-w-2xl mx-auto px-4 pt-3 pb-2.5 flex items-center gap-3">
-        <img src="icons/icon-192.png" alt="" width="40" height="40" class="w-10 h-10 rounded-xl ring-2 ring-haldi-300/60 shadow" />
+        <img src="icons/icon-80.png" alt="" width="40" height="40" class="w-10 h-10 rounded-xl ring-2 ring-haldi-300/60 shadow" />
         <div class="flex-1 min-w-0">
           <p id="app-blessing" class="hidden font-display text-[11px] leading-none text-haldi-200/90 truncate"></p>
           <h1 id="app-title" class="font-display text-[1.35rem] leading-tight truncate text-foil">Event Companion</h1>
@@ -69,9 +69,9 @@
 
   <!-- Banners -->
   <div id="banners" class="max-w-2xl mx-auto px-4 space-y-2">
-    <div id="banner-offline" role="status" class="hidden rounded-xl bg-marigold-100 text-marigold-900 border border-marigold-200 px-4 py-2.5 text-sm">
+    <output id="banner-offline" class="hidden rounded-xl bg-marigold-100 text-marigold-900 border border-marigold-200 px-4 py-2.5 text-sm">
       You're offline. Showing the last saved schedule.
-    </div>
+    </output>
 
     <div id="banner-notify" class="hidden card mandala-watermark p-4 items-center gap-3">
       <div class="w-11 h-11 shrink-0 rounded-full bg-marigold-100 grid place-items-center text-xl" aria-hidden="true">🔔</div>

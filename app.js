@@ -13,7 +13,7 @@
   }
 
   const CONFIG = window.APP_CONFIG || {};
-  const BASE_PATH = location.pathname.replace(/[^/]*$/, ''); // e.g. "/jan-wed-1/"
+  const BASE_PATH = location.pathname.slice(0, location.pathname.lastIndexOf('/') + 1); // e.g. "/jan-wed-1/"
   // The ID token is a bearer credential: keep it in sessionStorage (tab-scoped, gone on close).
   // GIS auto-select silently re-issues one on the next launch.
   const STORAGE = { CREDENTIAL: 'evt.credential', LAST_USER: 'evt.lastUser', DATA_CACHE: 'evt.data', INSTALL_DISMISSED: 'evt.installDismissed' };
@@ -26,12 +26,12 @@
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-  const escapeHtml = (value) => String(value ?? '').replace(/[&<>"'`]/g, (c) => (
+  const escapeHtml = (value) => String(value ?? '').replaceAll(/[&<>"'`]/g, (c) => (
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '`': '&#96;' }[c]
   ));
 
   /** Only Google-hosted avatars are rendered; anything else is dropped. */
-  const safePicture = (url) => (/^https:\/\/[a-z0-9.-]+\.googleusercontent\.com\//i.test(String(url || '')) ? String(url) : '');
+  const safePicture = (url) => (/^https:\/\/lh[3-6]\.googleusercontent\.com\//i.test(String(url || '')) ? String(url) : '');
 
   const formatDateTime = (value) => {
     if (!value) return '—';
@@ -48,11 +48,14 @@
     return new Date(date).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   };
 
+  /** Uniform number in [0, 1) from the Web Crypto API. */
+  const randomUnit = () => crypto.getRandomValues(new Uint32Array(1))[0] / 4294967296;
+
   /** Display-only decode; the backend verifies the signature with Google on every call. */
   const decodeJwt = (token) => {
     try {
-      const b64 = String(token).split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
-      const json = decodeURIComponent(atob(b64).split('').map((c) => `%${(`00${c.charCodeAt(0).toString(16)}`).slice(-2)}`).join(''));
+      const b64 = String(token).split('.')[1].replaceAll('-', '+').replaceAll('_', '/');
+      const json = decodeURIComponent(atob(b64).split('').map((c) => `%${c.codePointAt(0).toString(16).padStart(2, '0')}`).join(''));
       return JSON.parse(json);
     } catch {
       return null;
@@ -84,6 +87,7 @@
   const Store = {
     state: {
       itinerary: [],
+      /** @type {Guest[]} */
       logistics: [],
       members: [],
       user: null,          // { email, name, picture, idToken, exp }
@@ -167,7 +171,7 @@
         // Role was downgraded server-side since the last sync: drop admin data now, then resync.
         if (err.code === 'FORBIDDEN' && /not authorized/i.test(err.message)) {
           Store.set({ isAdmin: false, role: 'Viewer', tab: 'schedule', logistics: [], members: [] });
-          Auth.loadSession();
+          void Auth.loadSession();
         }
         throw err;
       }
@@ -186,7 +190,7 @@
       const saved = sessionStore.get(STORAGE.CREDENTIAL);
       if (saved?.idToken && !this.isExpired(saved)) {
         Store.set({ user: saved, authStatus: 'checking' });
-        this.loadSession();
+        void this.loadSession();
       } else if (!navigator.onLine && this.restoreOffline()) {
         // Previously verified member, offline: show the cached schedule read-only.
       } else {
@@ -264,7 +268,7 @@
       if (!wasAuthed) this.epoch += 1; // a different identity: discard any in-flight responses
       Store.set({ user, deniedEmail: null, authStatus: wasAuthed ? 'authed' : 'checking', ...(wasAuthed ? {} : { loading: false }) });
       Modal.close();
-      this.loadSession(!wasAuthed);
+      void this.loadSession(!wasAuthed);
     },
 
     async loadSession(announce = false) {
@@ -275,43 +279,49 @@
       try {
         const data = await Api.post('session');
         if (stale()) return;
-        const savedAt = new Date().toISOString();
-        const isAdmin = data.isAdmin === true && data.role === 'Admin';
-        const user = {
-          ...Store.state.user,
-          name: String(data.name || Store.state.user.name).slice(0, 100),
-          picture: safePicture(data.picture) || Store.state.user.picture,
-        };
-        // Persist only what offline mode needs: the schedule and a token-free identity.
-        storage.set(STORAGE.DATA_CACHE, { email: user.email, role: isAdmin ? 'Admin' : 'Viewer', itinerary: data.itinerary, savedAt });
-        storage.set(STORAGE.LAST_USER, { email: user.email, name: user.name, picture: user.picture });
-        Store.set({
-          authStatus: 'authed',
-          role: isAdmin ? 'Admin' : 'Viewer',
-          isAdmin,
-          itinerary: Array.isArray(data.itinerary) ? data.itinerary : [],
-          logistics: isAdmin && Array.isArray(data.logistics) ? data.logistics : [],
-          members: isAdmin && Array.isArray(data.members) ? data.members : [],
-          lastSynced: savedAt,
-          error: null,
-          tourStatus: ['Pending', 'Completed', 'Skipped'].includes(data.tourStatus) ? data.tourStatus : 'Completed',
-          user,
-        });
-        Nudges.onSync();
-        if (announce) Welcome.show(user, { isAdmin, onClose: () => Tour.maybeStart() });
-        else Tour.maybeStart();
+        this.applySession(data, announce);
       } catch (err) {
-        if (stale()) return;
-        if (['AUTH_EXPIRED', 'AUTH_INVALID', 'AUTH_REQUIRED', 'NOT_MEMBER'].includes(err.code)) return;
-        if (Store.state.authStatus === 'checking') {
-          // Couldn't verify (network/server). Fall back to cache if this member was verified before.
-          if (!this.restoreOffline()) Store.set({ authStatus: 'signed-out' });
-        }
-        Store.set({ error: err.message });
-        Toast.show(`Could not sync: ${err.message}`, 'error');
+        if (!stale()) this.onSessionError(err);
       } finally {
         if (!stale()) Store.set({ loading: false });
       }
+    },
+
+    applySession(data, announce) {
+      const savedAt = new Date().toISOString();
+      const isAdmin = data.isAdmin === true && data.role === 'Admin';
+      const user = {
+        ...Store.state.user,
+        name: String(data.name || Store.state.user.name).slice(0, 100),
+        picture: safePicture(data.picture) || Store.state.user.picture,
+      };
+      // Persist only what offline mode needs: the schedule and a token-free identity.
+      storage.set(STORAGE.DATA_CACHE, { email: user.email, role: isAdmin ? 'Admin' : 'Viewer', itinerary: data.itinerary, savedAt });
+      storage.set(STORAGE.LAST_USER, { email: user.email, name: user.name, picture: user.picture });
+      Store.set({
+        authStatus: 'authed',
+        role: isAdmin ? 'Admin' : 'Viewer',
+        isAdmin,
+        itinerary: Array.isArray(data.itinerary) ? data.itinerary : [],
+        logistics: isAdmin && Array.isArray(data.logistics) ? data.logistics : [],
+        members: isAdmin && Array.isArray(data.members) ? data.members : [],
+        lastSynced: savedAt,
+        error: null,
+        tourStatus: ['Pending', 'Completed', 'Skipped'].includes(data.tourStatus) ? data.tourStatus : 'Completed',
+        user,
+      });
+      Nudges.onSync();
+      if (announce) Welcome.show(user, { isAdmin, onClose: () => Tour.maybeStart() });
+      else Tour.maybeStart();
+    },
+
+    onSessionError(err) {
+      // Auth failures are already handled by Api (re-prompt / deny screen).
+      if (['AUTH_EXPIRED', 'AUTH_INVALID', 'AUTH_REQUIRED', 'NOT_MEMBER'].includes(err.code)) return;
+      // Couldn't verify (network/server). Fall back to cache if this member was verified before.
+      if (Store.state.authStatus === 'checking' && !this.restoreOffline()) Store.set({ authStatus: 'signed-out' });
+      Store.set({ error: err.message });
+      Toast.show(`Could not sync: ${err.message}`, 'error');
     },
 
     clearSession(patch) {
@@ -354,7 +364,7 @@
       clearInterval(this.renewTimer);
       this.renewTimer = setInterval(() => {
         const u = Store.state.user;
-        if (Store.state.authStatus === 'authed' && u && u.exp * 1000 - Date.now() < 5 * 60 * 1000) this.prompt();
+        if (Store.state.authStatus === 'authed' && u?.exp * 1000 - Date.now() < 5 * 60 * 1000) this.prompt();
       }, 60000);
     },
   };
@@ -366,7 +376,7 @@
 
     init() {
       if (isPlaceholder(CONFIG.ONESIGNAL_APP_ID)) { this.render(); return; }
-      window.OneSignalDeferred = window.OneSignalDeferred || [];
+      window.OneSignalDeferred ??= [];
       window.OneSignalDeferred.push(async (OneSignal) => {
         try {
           await OneSignal.init({
@@ -528,7 +538,7 @@
           </div>
         </div>`;
       root.querySelector('[data-modal-backdrop]').addEventListener('click', (e) => {
-        if (e.target.hasAttribute('data-modal-backdrop')) this.close();
+        if ('modalBackdrop' in e.target.dataset) this.close();
       });
       onMount?.(root);
       root.querySelector('button')?.focus();
@@ -555,15 +565,16 @@
       layer.className = 'fixed inset-0 z-[80] pointer-events-none overflow-hidden';
       layer.setAttribute('aria-hidden', 'true');
       const kinds = ['🌼', '🌸', '🏵️', '🌺'];
+      const rand = randomUnit;
       for (let i = 0; i < count; i++) {
         const p = document.createElement('span');
         p.className = 'petal';
         p.textContent = kinds[i % kinds.length];
-        p.style.left = `${Math.random() * 100}%`;
-        p.style.fontSize = `${14 + Math.random() * 14}px`;
-        p.style.animationDuration = `${3.5 + Math.random() * 3}s`;
-        p.style.animationDelay = `${Math.random() * 1.2}s`;
-        p.style.setProperty('--drift', `${(Math.random() - 0.5) * 160}px`);
+        p.style.left = `${rand() * 100}%`;
+        p.style.fontSize = `${14 + rand() * 14}px`;
+        p.style.animationDuration = `${3.5 + rand() * 3}s`;
+        p.style.animationDelay = `${rand() * 1.2}s`;
+        p.style.setProperty('--drift', `${(rand() - 0.5) * 160}px`);
         layer.appendChild(p);
       }
       document.body.appendChild(layer);
@@ -581,7 +592,8 @@
       this.remember();
       if (!fresh.length) return;
       const e = fresh[0];
-      Toast.show(`🪔 ${e.title} has begun${e.location ? ` at ${e.location}` : ''} — please join us!`, 'success', 6500);
+      const where = e.location ? ` at ${e.location}` : '';
+      Toast.show(`🪔 ${e.title} has begun${where} — please join us!`, 'success', 6500);
       Festive.petals(20);
     },
     reset() { this.seenLive = null; },
@@ -853,9 +865,12 @@
       ${text ? `<p class="text-sm text-ink-500 mt-1">${text}</p>` : ''}
     </header>`;
 
+  const DOT_CLASS = { Live: 'bg-kumkum-600', Completed: 'bg-ink-300', Upcoming: 'bg-marigold-400' };
+
   const groupByDay = (events) => events.reduce((acc, ev) => {
     const key = ev.day || 'Schedule';
-    (acc[key] = acc[key] || []).push(ev);
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(ev);
     return acc;
   }, {});
 
@@ -882,7 +897,7 @@
           <div class="relative mt-4">
             <div class="flex justify-between text-[11px] font-semibold text-ink-500"><span>${done} of ${total} ceremonies done</span><span>${pct}%</span></div>
             <div class="mt-1 h-1.5 rounded-full bg-haldi-100 overflow-hidden" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="Celebration progress">
-              <div class="h-full rounded-full bg-gradient-to-r from-marigold-400 to-kumkum-500 transition-all" style="width:${pct}%"></div>
+              <div class="h-full rounded-full bg-gradient-to-r from-marigold-400 to-kumkum-500 transition-all w-0" data-progress="${pct}"></div>
             </div>
           </div>` : ''}
         </section>`;
@@ -957,8 +972,11 @@
           ${days.map(([day, events], i) => {
             const hasLive = events.some((e) => e.status === 'Live');
             const allDone = events.every((e) => e.status === 'Completed');
+            let mark = '';
+            if (allDone) mark = ' ✓';
+            else if (hasLive) mark = ' •';
             return `<button data-action="jump-day" data-day="${i}" class="chip-off shrink-0 ${hasLive ? 'ring-2 ring-kumkum-400' : ''}">
-              Day ${i + 1}${allDone ? ' ✓' : hasLive ? ' •' : ''}<span class="sr-only"> — ${escapeHtml(day)}</span></button>`;
+              Day ${i + 1}${mark}<span class="sr-only"> — ${escapeHtml(day)}</span></button>`;
           }).join('')}
         </nav>` : '';
 
@@ -972,7 +990,7 @@
           <ol class="relative ml-2 border-l-2 border-dashed border-haldi-300 space-y-3">
             ${events.map((e) => `
               <li class="ml-5 relative">
-                <span class="absolute -left-[29px] top-5 grid place-items-center w-4 h-4 rounded-full ring-4 ring-ivory-100 ${e.status === 'Live' ? 'bg-kumkum-600' : e.status === 'Completed' ? 'bg-ink-300' : 'bg-marigold-400'}" aria-hidden="true"></span>
+                <span class="absolute -left-[29px] top-5 grid place-items-center w-4 h-4 rounded-full ring-4 ring-ivory-100 ${DOT_CLASS[e.status] || DOT_CLASS.Upcoming}" aria-hidden="true"></span>
                 <article class="card p-4 ${e.status === 'Live' ? 'ring-2 ring-kumkum-400' : ''} ${e.status === 'Completed' ? 'opacity-70' : ''}">
                   <div class="flex items-start justify-between gap-2">
                     <p class="inline-flex items-center gap-1 text-xs font-semibold text-ink-500">${clock}${escapeHtml(e.time)}</p>
@@ -1076,17 +1094,17 @@
     const chip = (value, label) => `<button data-action="pickup-filter" data-value="${value}" aria-pressed="${s.pickupFilter === value}"
         class="${s.pickupFilter === value ? 'chip-on' : 'chip-off'} shrink-0">${label}</button>`;
 
-    return `
-      ${pageHeader('Arrivals', 'Pick-ups')}
-      <div class="card p-4 mb-3">
-        <div class="flex justify-between text-sm text-ink-700"><span>${done} of ${total} families welcomed</span><span class="font-semibold">${pct}%</span></div>
-        <div class="mt-2 h-2 rounded-full bg-haldi-100 overflow-hidden"><div class="h-full rounded-full bg-gradient-to-r from-mehndi-400 to-mehndi-600 transition-all" style="width:${pct}%"></div></div>
-      </div>
-      <input type="search" data-action="pickup-search" value="${escapeHtml(s.pickupSearch)}" placeholder="Search name, contact, mode…" aria-label="Search pick-ups" class="input" />
-      <div class="flex gap-2 my-3 overflow-x-auto no-scrollbar">
-        ${chip('all', `All (${total})`)}${chip('Pending', `Pending (${total - done})`)}${chip('Picked Up', `Picked Up (${done})`)}
-      </div>
-      ${!list.length ? emptyState('🚐', total ? 'No matching guests' : 'No arrivals yet', total ? 'Try a different search or filter.' : 'Add rows to the "Logistics" sheet.') : `
+    const empty = total
+      ? emptyState('🚐', 'No matching guests', 'Try a different search or filter.')
+      : emptyState('🚐', 'No arrivals yet', 'Add rows to the "Logistics" sheet.');
+    const guestCount = (g) => (g.members ? `<span class="text-xs font-normal text-ink-500">· ${escapeHtml(g.members)} guests</span>` : '');
+    const contactLink = (g) => {
+      if (!g.contact) return '';
+      const tel = escapeHtml(String(g.contact).replaceAll(/[^\d+]/g, ''));
+      return `<a href="tel:${tel}" class="text-sm font-medium text-kumkum-600">📞 ${escapeHtml(g.contact)}</a>`;
+    };
+
+    const listHtml = `
       <div class="space-y-3">
         ${list.map((g) => {
           const picked = g.pickupStatus === 'Picked Up';
@@ -1095,8 +1113,8 @@
           <article class="card p-4 ${picked ? 'ring-1 ring-mehndi-300' : ''}">
             <div class="flex items-start justify-between gap-2">
               <div class="min-w-0">
-                <h4 class="font-semibold text-ink-900 truncate">${escapeHtml(g.name)} ${g.members ? `<span class="text-xs font-normal text-ink-500">· ${escapeHtml(g.members)} guests</span>` : ''}</h4>
-                ${g.contact ? `<a href="tel:${escapeHtml(String(g.contact).replace(/[^\d+]/g, ''))}" class="text-sm font-medium text-kumkum-600">📞 ${escapeHtml(g.contact)}</a>` : ''}
+                <h4 class="font-semibold text-ink-900 truncate">${escapeHtml(g.name)} ${guestCount(g)}</h4>
+                ${contactLink(g)}
               </div>
               ${badge(g.pickupStatus)}
             </div>
@@ -1111,7 +1129,19 @@
             </button>
           </article>`;
         }).join('')}
-      </div>`}`;
+      </div>`;
+
+    return `
+      ${pageHeader('Arrivals', 'Pick-ups')}
+      <div class="card p-4 mb-3">
+        <div class="flex justify-between text-sm text-ink-700"><span>${done} of ${total} families welcomed</span><span class="font-semibold">${pct}%</span></div>
+        <div class="mt-2 h-2 rounded-full bg-haldi-100 overflow-hidden"><div class="h-full rounded-full bg-gradient-to-r from-mehndi-400 to-mehndi-600 transition-all w-0" data-progress="${pct}"></div></div>
+      </div>
+      <input type="search" data-action="pickup-search" value="${escapeHtml(s.pickupSearch)}" placeholder="Search name, contact, mode…" aria-label="Search pick-ups" class="input" />
+      <div class="flex gap-2 my-3 overflow-x-auto no-scrollbar">
+        ${chip('all', `All (${total})`)}${chip('Pending', `Pending (${total - done})`)}${chip('Picked Up', `Picked Up (${done})`)}
+      </div>
+      ${list.length ? listHtml : empty}`;
   };
 
   Views.members = (s) => {
@@ -1121,7 +1151,40 @@
     const adminCount = s.members.filter((m) => m.role === 'Admin').length;
     const roleOptions = (current) => ROLES.map((r) => `<option value="${r}" ${r === current ? 'selected' : ''}>${r}</option>`).join('');
     const stat = (n, label) => `<div class="card py-2"><p class="font-display text-xl text-kumkum-700">${n}</p><p class="text-[11px] text-ink-500">${label}</p></div>`;
-    const tourChip = (t) => (t === 'Completed' ? '· toured ✓' : t === 'Skipped' ? '· tour skipped' : '· not visited yet');
+    const TOUR_CHIP = { Completed: '· toured ✓', Skipped: '· tour skipped' };
+    const tourChip = (t) => TOUR_CHIP[t] || '· not visited yet';
+    const empty = emptyState('👥', s.members.length ? 'No matching members' : 'No members yet');
+    const lockReason = (self, lastAdmin, selfText, fallback) => {
+      if (self) return selfText;
+      if (lastAdmin) return 'At least one admin must remain';
+      return fallback;
+    };
+    const addedLine = (m) => (m.addedDate ? ` · ${escapeHtml(formatDateTime(m.addedDate))}` : '');
+    const listHtml = `
+      <ul class="card divide-y divide-haldi-100">
+        ${list.map((m) => {
+          const self = m.email === me;
+          const busy = Store.isPending(`member:${m.email}`);
+          const lastAdmin = m.role === 'Admin' && adminCount <= 1;
+          return `
+          <li class="flex items-center gap-3 p-3">
+            <div class="w-9 h-9 shrink-0 rounded-full ${m.role === 'Admin' ? 'bg-kumkum-100 text-kumkum-700' : 'bg-haldi-100 text-haldi-800'} grid place-items-center font-bold">${escapeHtml(m.email[0]?.toUpperCase() || '?')}</div>
+            <div class="flex-1 min-w-0">
+              <p class="text-sm font-medium text-ink-900 truncate">${escapeHtml(m.email)} ${self ? '<span class="ml-1 rounded-full bg-kumkum-600 text-ivory-50 text-[10px] px-2 py-0.5">You</span>' : ''}</p>
+              <p class="text-xs text-ink-400 truncate">Added by ${escapeHtml(m.addedBy || '—')}${addedLine(m)} ${tourChip(m.tourStatus)}</p>
+            </div>
+            <select data-action="set-role" data-email="${escapeHtml(m.email)}" aria-label="Role for ${escapeHtml(m.email)}" ${self || busy || lastAdmin ? 'disabled' : ''}
+              title="${lockReason(self, lastAdmin, 'You cannot change your own role', 'Change role')}"
+              class="shrink-0 rounded-lg border border-haldi-300 bg-ivory-50 text-xs px-2 py-1.5 disabled:opacity-50">${roleOptions(m.role)}</select>
+            <button data-action="remove-member" data-email="${escapeHtml(m.email)}" ${self || busy || lastAdmin ? 'disabled' : ''}
+              title="${lockReason(self, lastAdmin, 'You cannot remove yourself', 'Remove member')}" aria-label="Remove ${escapeHtml(m.email)}"
+              class="btn btn-danger btn-sm shrink-0">
+              ${busy ? '<span class="spinner"></span>' : 'Remove'}
+            </button>
+          </li>`;
+        }).join('')}
+      </ul>`;
+
     return `
       ${pageHeader('Guest list', 'Members &amp; access', 'Only people on this list can open the app. <b>Admins</b> host the event; <b>Viewers</b> follow the schedule. Every change is recorded in the AuditLog.')}
       <div class="grid grid-cols-3 gap-2 text-center mb-4">${stat(s.members.length, 'Members')}${stat(adminCount, 'Admins')}${stat(s.members.length - adminCount, 'Viewers')}</div>
@@ -1136,57 +1199,37 @@
         </div>
       </form>
       <input type="search" data-action="member-search" value="${escapeHtml(s.memberSearch)}" placeholder="Search members…" aria-label="Search members" class="input mb-3" />
-      ${!list.length ? emptyState('👥', s.members.length ? 'No matching members' : 'No members yet') : `
-      <ul class="card divide-y divide-haldi-100">
-        ${list.map((m) => {
-          const self = m.email === me;
-          const busy = Store.isPending(`member:${m.email}`);
-          const lastAdmin = m.role === 'Admin' && adminCount <= 1;
-          return `
-          <li class="flex items-center gap-3 p-3">
-            <div class="w-9 h-9 shrink-0 rounded-full ${m.role === 'Admin' ? 'bg-kumkum-100 text-kumkum-700' : 'bg-haldi-100 text-haldi-800'} grid place-items-center font-bold">${escapeHtml(m.email[0]?.toUpperCase() || '?')}</div>
-            <div class="flex-1 min-w-0">
-              <p class="text-sm font-medium text-ink-900 truncate">${escapeHtml(m.email)} ${self ? '<span class="ml-1 rounded-full bg-kumkum-600 text-ivory-50 text-[10px] px-2 py-0.5">You</span>' : ''}</p>
-              <p class="text-xs text-ink-400 truncate">Added by ${escapeHtml(m.addedBy || '—')}${m.addedDate ? ` · ${escapeHtml(formatDateTime(m.addedDate))}` : ''} ${tourChip(m.tourStatus)}</p>
-            </div>
-            <select data-action="set-role" data-email="${escapeHtml(m.email)}" aria-label="Role for ${escapeHtml(m.email)}" ${self || busy || lastAdmin ? 'disabled' : ''}
-              title="${self ? 'You cannot change your own role' : lastAdmin ? 'At least one admin must remain' : 'Change role'}"
-              class="shrink-0 rounded-lg border border-haldi-300 bg-ivory-50 text-xs px-2 py-1.5 disabled:opacity-50">${roleOptions(m.role)}</select>
-            <button data-action="remove-member" data-email="${escapeHtml(m.email)}" ${self || busy || lastAdmin ? 'disabled' : ''}
-              title="${self ? 'You cannot remove yourself' : lastAdmin ? 'At least one admin must remain' : 'Remove member'}" aria-label="Remove ${escapeHtml(m.email)}"
-              class="btn btn-danger btn-sm shrink-0">
-              ${busy ? '<span class="spinner"></span>' : 'Remove'}
-            </button>
-          </li>`;
-        }).join('')}
-      </ul>`}`;
+      ${list.length ? listHtml : empty}`;
   };
 
   /* --------------------------------------------------------------- Render */
-  const ADMIN_TABS = ['control', 'pickups', 'members'];
+  const ADMIN_TABS = new Set(['control', 'pickups', 'members']);
   let lastGateKey = null;
 
-  function render(s) {
-    const signedIn = ['authed', 'offline'].includes(s.authStatus);
+  function syncLabel(s, signedIn) {
+    const tagline = CONFIG.EVENT_TAGLINE || '';
+    if (!signedIn) return tagline;
+    if (s.authStatus === 'offline') return `Offline · last synced ${timeAgo(s.lastSynced)}`;
+    if (s.loading) return 'Syncing…';
+    if (s.error) return s.lastSynced ? `Last synced ${timeAgo(s.lastSynced)}` : 'Not synced';
+    return s.lastSynced ? `${tagline} · updated ${timeAgo(s.lastSynced)}` : tagline;
+  }
 
-    // Header / account
+  function renderHeader(s, signedIn) {
     $('#app-title').textContent = CONFIG.EVENT_NAME || 'Event Companion';
-    const syncText = !signedIn ? (CONFIG.EVENT_TAGLINE || '')
-      : s.authStatus === 'offline' ? `Offline · last synced ${timeAgo(s.lastSynced)}`
-        : s.loading ? 'Syncing…'
-          : s.error ? `${s.lastSynced ? `Last synced ${timeAgo(s.lastSynced)}` : 'Not synced'}`
-            : `${CONFIG.EVENT_TAGLINE || ''}${s.lastSynced ? ` · updated ${timeAgo(s.lastSynced)}` : ''}`;
-    $('#sync-indicator').textContent = syncText;
+    $('#sync-indicator').textContent = syncLabel(s, signedIn);
     const blessing = $('#app-blessing');
     if (blessing) {
       blessing.textContent = signedIn ? (CONFIG.EVENT_BLESSING || '') : '';
       blessing.classList.toggle('hidden', !blessing.textContent);
     }
-    $('#refresh-btn').classList.toggle('hidden', !signedIn);
-    $('#refresh-btn').setAttribute('aria-busy', String(!!s.loading));
-    $('#refresh-btn svg')?.classList.toggle('animate-spin', !!s.loading);
-    $('#account-btn').classList.toggle('hidden', !signedIn);
-    $('#account-btn').classList.toggle('flex', signedIn);
+    const refreshBtn = $('#refresh-btn');
+    refreshBtn.classList.toggle('hidden', !signedIn);
+    refreshBtn.setAttribute('aria-busy', String(!!s.loading));
+    refreshBtn.querySelector('svg')?.classList.toggle('animate-spin', !!s.loading);
+    const accountBtn = $('#account-btn');
+    accountBtn.classList.toggle('hidden', !signedIn);
+    accountBtn.classList.toggle('flex', signedIn);
 
     if (s.user) {
       const picture = safePicture(s.user.picture);
@@ -1198,9 +1241,10 @@
 
     $('#banner-offline').classList.toggle('hidden', s.online);
     Push.render();
+  }
 
-    // Navigation
-    if (!s.isAdmin && ADMIN_TABS.includes(s.tab)) s.tab = 'schedule';
+  function renderNav(s, signedIn) {
+    if (!s.isAdmin && ADMIN_TABS.has(s.tab)) s.tab = 'schedule';
     $('#nav-grid').className = `max-w-2xl mx-auto grid ${s.isAdmin ? 'grid-cols-4' : 'grid-cols-1'}`;
     $('#bottom-nav').classList.toggle('hidden', !signedIn || !s.isAdmin);
     $$('.nav-btn').forEach((btn) => {
@@ -1214,38 +1258,61 @@
       if (pill) { pill.classList.toggle('bg-kumkum-100', active); pill.classList.toggle('bg-transparent', !active); }
       btn.setAttribute('aria-current', active ? 'page' : 'false');
     });
+  }
 
-    // Login gate: re-render only when its state changes so the Google button isn't torn down.
-    if (!signedIn) {
-      const key = `${s.authStatus}|${s.deniedEmail}|${s.gsiReady}|${s.online}`;
-      if (key !== lastGateKey) {
-        lastGateKey = key;
-        $('#view').innerHTML = Views.gate(s);
-        if (s.authStatus !== 'checking') Auth.renderButton($('#gsi-gate'));
-      }
-      return;
-    }
-    lastGateKey = null;
+  /** Login gate: re-render only when its state changes so the Google button isn't torn down. */
+  function renderGate(s) {
+    const key = `${s.authStatus}|${s.deniedEmail}|${s.gsiReady}|${s.online}`;
+    if (key === lastGateKey) return;
+    lastGateKey = key;
+    $('#view').innerHTML = Views.gate(s);
+    if (s.authStatus !== 'checking') Auth.renderButton($('#gsi-gate'));
+  }
 
-    // Preserve focus/caret and draft input across re-renders
+  /** Renders the active tab, preserving focus/caret and draft input across re-renders. */
+  function renderView(s) {
     const active = document.activeElement;
     const focusKey = active?.dataset?.action;
     const caret = focusKey && typeof active.selectionStart === 'number' ? active.selectionStart : null;
-    const draftForm = $('form[data-action="add-member"]');
-    const draft = draftForm ? { email: draftForm.elements.email.value, role: draftForm.elements.role.value, focused: active === draftForm.elements.email } : null;
+    const before = memberFormFields();
+    const draft = before ? { email: before.email.value, role: before.role.value, focused: active === before.email } : null;
 
     $('#view').innerHTML = (Views[s.tab] || Views.schedule)(s);
+    applyProgressWidths();
 
-    const form = $('form[data-action="add-member"]');
-    if (form && draft) {
-      form.elements.email.value = draft.email;
-      form.elements.role.value = draft.role;
-      if (draft.focused) form.elements.email.focus();
+    const after = memberFormFields();
+    if (after && draft) {
+      after.email.value = draft.email;
+      after.role.value = draft.role;
+      if (draft.focused) after.email.focus();
     }
     if (['pickup-search', 'member-search'].includes(focusKey)) {
       const el = $(`[data-action="${focusKey}"]`);
       if (el) { el.focus(); if (caret !== null) el.setSelectionRange(caret, caret); }
     }
+  }
+
+  /** @returns {MemberFormFields | null} the inputs of the "Add member" form, if it is on screen. */
+  function memberFormFields(form = $('form[data-action="add-member"]')) {
+    if (!form) return null;
+    return {
+      email: /** @type {HTMLInputElement} */ (form.querySelector('[name="email"]')),
+      role: /** @type {HTMLSelectElement} */ (form.querySelector('[name="role"]')),
+    };
+  }
+
+  /** Progress bars carry their width in data-progress; set via CSSOM so the CSP needs no inline styles. */
+  function applyProgressWidths() {
+    $$('[data-progress]').forEach((el) => { el.style.width = `${Number(el.dataset.progress) || 0}%`; });
+  }
+
+  function render(s) {
+    const signedIn = ['authed', 'offline'].includes(s.authStatus);
+    renderHeader(s, signedIn);
+    renderNav(s, signedIn);
+    if (!signedIn) { renderGate(s); return; }
+    lastGateKey = null;
+    renderView(s);
   }
 
   /* ----------------------------------------------------------------- Data */
@@ -1265,7 +1332,7 @@
     startPolling() {
       clearInterval(this.timer);
       this.timer = setInterval(() => {
-        if (document.visibilityState === 'visible' && navigator.onLine) this.refresh();
+        if (document.visibilityState === 'visible' && navigator.onLine) void this.refresh();
       }, CONFIG.REFRESH_INTERVAL_MS || 60000);
     },
   };
@@ -1314,9 +1381,9 @@
     },
 
     async addMember(form) {
-      const input = form.elements.email;
+      const { email: input, role: roleSelect } = memberFormFields(form);
       const email = input.value.trim().toLowerCase();
-      const role = form.elements.role.value;
+      const role = roleSelect.value;
       if (email.length > 254 || !EMAIL_RE.test(email)) { Toast.show('Enter a valid email address.', 'error'); input.focus(); return; }
       if (!ROLES.includes(role)) { Toast.show('Choose a valid role.', 'error'); return; }
       if (Store.state.members.some((m) => m.email === email)) { Toast.show(`${email} is already a member.`, 'info'); return; }
@@ -1357,7 +1424,7 @@
             const message = root.querySelector('#wa-message').value.trim() || WhatsApp.buildMessage(ev);
             WhatsApp.open(message); // synchronous within the click gesture
             Modal.close();
-            this.updateEvent(ev.id, 'Live', true);
+            void this.updateEvent(ev.id, 'Live', true);
           });
         },
       });
@@ -1405,18 +1472,19 @@
     const view = $('#view');
     view.addEventListener('click', (e) => {
       const el = e.target.closest('[data-action]');
-      if (!el || el.disabled) return;
+      if (!el) return;
+      if (el.disabled) return;
       const { action, id } = el.dataset;
       switch (action) {
-        case 'refresh': Data.refresh(); break;
+        case 'refresh': void Data.refresh(); break;
         case 'open-broadcast': Actions.openBroadcast(id); break;
         case 'share-whatsapp': {
           const ev = findEvent(id);
           if (ev) WhatsApp.open(WhatsApp.buildMessage(ev));
           break;
         }
-        case 'toggle-pickup': Actions.updatePickup(id, el.dataset.next); break;
-        case 'remove-member': Actions.removeMember(el.dataset.email); break;
+        case 'toggle-pickup': void Actions.updatePickup(id, el.dataset.next); break;
+        case 'remove-member': void Actions.removeMember(el.dataset.email); break;
         case 'pickup-filter': Store.set({ pickupFilter: el.dataset.value }); break;
         case 'jump-day': $(`#day-${Number(el.dataset.day)}`)?.scrollIntoView({ behavior: reducedMotion() ? 'auto' : 'smooth', block: 'start' }); break;
         default: break;
@@ -1429,7 +1497,7 @@
         const member = Store.state.members.find((m) => m.email === roleSel.dataset.email);
         const role = roleSel.value;
         roleSel.value = member?.role || 'Viewer'; // revert until the server confirms
-        if (member && role !== member.role) Actions.setRole(member.email, role);
+        if (member && role !== member.role) void Actions.setRole(member.email, role);
         return;
       }
       const el = e.target.closest('select[data-action="set-status"]');
@@ -1439,7 +1507,7 @@
       el.value = ev?.status || 'Upcoming'; // revert until the server confirms
       if (!ev || status === ev.status) return;
       if (status === 'Live') { Actions.openBroadcast(ev.id); return; }
-      if (window.confirm(`Change "${ev.title}" to ${status}?`)) Actions.updateEvent(ev.id, status, false);
+      if (window.confirm(`Change "${ev.title}" to ${status}?`)) void Actions.updateEvent(ev.id, status, false);
     });
 
     view.addEventListener('input', (e) => {
@@ -1451,14 +1519,14 @@
       const form = e.target.closest('form[data-action="add-member"]');
       if (!form) return;
       e.preventDefault();
-      Actions.addMember(form);
+      void Actions.addMember(form);
     });
 
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !Tour.active && !Welcome.open) Modal.close(); });
-    window.addEventListener('online', () => { Store.set({ online: true }); Data.refresh(); });
+    window.addEventListener('online', () => { Store.set({ online: true }); void Data.refresh(); });
     window.addEventListener('offline', () => Store.set({ online: false }));
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') { Data.refresh(); Push.render(); }
+      if (document.visibilityState === 'visible') { void Data.refresh(); Push.render(); }
     });
   }
 
@@ -1484,7 +1552,7 @@
     registerServiceWorker();
     Install.init();
     Push.init();
-    Auth.init();
+    void Auth.init();
     Auth.scheduleRenewal();
     Data.startPolling();
   }
