@@ -36,13 +36,14 @@ const CONFIG = `window.APP_CONFIG = Object.freeze({ EVENT_NAME: 'Test Fest', EVE
   ONESIGNAL_APP_ID: 'test-onesignal-app', REFRESH_INTERVAL_MS: 600000, REQUEST_TIMEOUT_MS: 5000 });`;
 
 const ONESIGNAL_STUB = `window.__oneSignalLog = [];
+window.__pushSubscribedStub = new URLSearchParams(location.search).has('pushOn');
 window.OneSignalDeferred = { push(callback) {
   const initialize = () => callback({
     init: async () => {},
     login: async (id) => window.__oneSignalLog.push('login:' + id),
     logout: async () => window.__oneSignalLog.push('logout'),
-    Notifications: { permission: false, addEventListener() {}, requestPermission: async () => {} },
-    User: { PushSubscription: { id: null, optedIn: false, addEventListener() {}, optIn: async () => {} } },
+    Notifications: { permission: window.__pushSubscribedStub, addEventListener() {}, requestPermission: async () => { window.__oneSignalPermissionRequests += 1; } },
+    User: { PushSubscription: { id: window.__pushSubscribedStub ? 'registered' : null, optedIn: window.__pushSubscribedStub, addEventListener() {}, optIn: async () => {} } },
   });
   if (new URLSearchParams(location.search).has('delayPush')) window.__releasePushInit = () => { void initialize(); };
   else void initialize();
@@ -63,7 +64,7 @@ function makeBackend() {
   const clearedNotifications = new Map();
   const email = (tok) => JSON.parse(Buffer.from(tok.split('.')[1], 'base64url').toString()).email;
   return {
-    audit, members, itinerary, logistics, notifications, groupCatalog, calls: 0, tourCalls: [], expireNext: false,
+    audit, members, itinerary, logistics, notifications, groupCatalog, calls: 0, tourCalls: [], expireNext: false, failNextAction: null,
     handle(body) {
       this.calls += 1;
       const me = email(body.idToken);
@@ -90,6 +91,10 @@ function makeBackend() {
       }
       if (body.action === 'completeTour') { // any member may record their own tour outcome
         this.tourCalls.push(`${me}|${body.payload.status}`);
+        if (this.failNextAction === body.action) {
+          this.failNextAction = null;
+          return { ok: false, code: 'TEST_FAILURE', error: 'Simulated request failure.' };
+        }
         if (m.tourStatus === 'Pending') m.tourStatus = body.payload.status;
         return { ok: true, data: { tourStatus: m.tourStatus } };
       }
@@ -99,6 +104,10 @@ function makeBackend() {
       }
       if (!isAdmin) return { ok: false, code: 'FORBIDDEN', error: 'You are not authorized to perform admin actions.' };
       const p = body.payload;
+      if (this.failNextAction === body.action) {
+        this.failNextAction = null;
+        return { ok: false, code: 'TEST_FAILURE', error: 'Simulated request failure.' };
+      }
       audit.push(`${me}|${body.action}|${JSON.stringify(p)}|${body.timestamp}`);
       const parseGroups = (value) => Array.isArray(value) ? value : (value ? value.split(',').map((x) => x.trim()).filter(Boolean) : []);
       if (body.action === 'addGroup') {
@@ -176,6 +185,10 @@ async function newPage(browser, backend, query = '', eventName = 'Test Fest') {
   page.on('dialog', (d) => d.accept());
   await page.addInitScript(() => {
     window.__cspViolations = [];
+    window.__oneSignalPermissionRequests = 0;
+    if (new URLSearchParams(location.search).has('pushOn') && 'Notification' in window) {
+      Object.defineProperty(Notification, 'permission', { configurable: true, value: 'granted' });
+    }
     document.addEventListener('securitypolicyviolation', (e) => window.__cspViolations.push(`${e.violatedDirective} ${e.blockedURI}`));
   });
   const pageConfig = CONFIG.replace("EVENT_NAME: 'Test Fest'", `EVENT_NAME: ${JSON.stringify(eventName)}`);
@@ -204,11 +217,103 @@ async function enter(page) {
 }
 
 const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('hidden'));
+async function assertTourStep(page, id, tab, target = null) {
+  const root = page.locator('#tour-root');
+  assert((await root.getAttribute('data-step-id')) === id, `tour step is ${id}`);
+  assert((await page.locator('#bottom-nav [aria-current="page"]').getAttribute('data-tab')) === tab, `${id} selects ${tab}`);
+  const targetSelector = target || await root.getAttribute('data-step-target');
+  if (targetSelector) assert(await page.locator(targetSelector).isVisible(), `${id} target is visible`);
+}
 
 (async () => {
   const browser = await chromium.launch();
   try {
     const backend = makeBackend();
+
+    console.log('Admin tour visits every host tab without running controls');
+    const adminTourBackend = makeBackend();
+    adminTourBackend.members.find((m) => m.email === 'admin@gmail.com').tourStatus = 'Pending';
+    adminTourBackend.itinerary.splice(0);
+    adminTourBackend.logistics.splice(0);
+    adminTourBackend.notifications.splice(0);
+    const adminTourPage = await newPage(browser, adminTourBackend);
+    await adminTourPage.waitForSelector('#fake-gsi');
+    await signIn(adminTourPage, 'admin@gmail.com');
+    await enter(adminTourPage);
+    await adminTourPage.waitForSelector('#tour-root');
+    const adminTourSteps = [
+      ['welcome', 'schedule'],
+      ['schedule', 'schedule', '#view [data-tour="schedule-overview"]'],
+      ['schedule-days', 'schedule'],
+      ['notifications', 'notifications', '#view [data-tour="notifications-overview"]'],
+      ['event-control', 'control', '#view [data-tour="event-control"]'],
+      ['pick-drop', 'pickups', '#view [data-tour="pick-drop-overview"]'],
+      ['members', 'members', '#view [data-tour="members-overview"]'],
+      ['notify', 'schedule'],
+      ['profile', 'schedule', '#account-btn'],
+      ['summary', 'schedule'],
+    ];
+    for (const [i, [id, tab, target]] of adminTourSteps.entries()) {
+      await assertTourStep(adminTourPage, id, tab, target);
+      if (id === 'notifications') assert(await adminTourPage.isVisible('text=No announcements yet'), 'empty notifications screen remains explained');
+      if (id === 'event-control') assert(await adminTourPage.isVisible('text=No ceremonies yet'), 'empty Event Control screen remains explained');
+      if (id === 'pick-drop') assert(await adminTourPage.isVisible('text=No travel plans yet'), 'empty Pick & Drop screen remains explained');
+      if (id === 'members') assert(await adminTourPage.isVisible('text=No group labels yet'), 'empty group catalog remains explained');
+      if (i < adminTourSteps.length - 1) await adminTourPage.click('[data-tour="next"]');
+    }
+    assert(adminTourBackend.audit.length === 0 && adminTourBackend.itinerary.length === 0 && adminTourBackend.logistics.length === 0,
+      'admin tour does not execute highlighted controls');
+    assert(await adminTourPage.evaluate(() => window.__oneSignalPermissionRequests) === 0, 'tour never requests notification permission');
+    await adminTourPage.click('[data-tour="next"]');
+    await adminTourPage.waitForSelector('#tour-root', { state: 'detached' });
+    assert(adminTourBackend.tourCalls.join() === 'admin@gmail.com|Completed', 'admin tour completion is recorded');
+    await adminTourPage.click('#account-btn');
+    await adminTourPage.click('[data-modal="tour"]');
+    await adminTourPage.waitForSelector('#tour-root');
+    await adminTourPage.click('[data-tour="next"]');
+    await adminTourPage.click('[data-tour="next"]');
+    await adminTourPage.click('[data-tour="next"]');
+    await adminTourPage.click('[data-tour="next"]');
+    await assertTourStep(adminTourPage, 'event-control', 'control', '#view [data-tour="event-control"]');
+    await adminTourPage.click('[data-tour="skip"]');
+    await adminTourPage.waitForSelector('#tour-root', { state: 'detached' });
+    assert(adminTourBackend.tourCalls.length === 1, 'replay uses the current Admin path without another completion write');
+    await adminTourPage.close();
+
+    console.log('Tour uses stable fallbacks when Atithi screens are empty');
+    const sparseTourBackend = makeBackend();
+    sparseTourBackend.members.find((m) => m.email === 'viewer@gmail.com').tourStatus = 'Pending';
+    sparseTourBackend.itinerary.splice(0);
+    sparseTourBackend.logistics.splice(0);
+    sparseTourBackend.notifications.splice(0);
+    const sparseTourPage = await newPage(browser, sparseTourBackend, '?pushOn=1');
+    await sparseTourPage.waitForSelector('#fake-gsi');
+    await signIn(sparseTourPage, 'viewer@gmail.com');
+    await enter(sparseTourPage);
+    await sparseTourPage.waitForSelector('#tour-root');
+    await sparseTourPage.click('[data-tour="next"]');
+    await assertTourStep(sparseTourPage, 'schedule', 'schedule', '#view [data-tour="schedule-overview"]');
+    await sparseTourPage.click('[data-tour="next"]');
+    await assertTourStep(sparseTourPage, 'schedule-days', 'schedule', '#view [data-tour="schedule-overview"]');
+    await sparseTourPage.click('[data-tour="next"]');
+    await assertTourStep(sparseTourPage, 'notifications', 'notifications', '#view [data-tour="notifications-overview"]');
+    await sparseTourPage.click('[data-tour="next"]');
+    await assertTourStep(sparseTourPage, 'travel', 'travel', '#view [data-tour="travel-overview"]');
+    assert(await sparseTourPage.isVisible('text=No travel plans yet'), 'no-plan travel guidance remains visible');
+    assert((await sparseTourPage.textContent('#tour-body')).includes('confirm your RSVP'),
+      'no-plan tour copy prompts Atithis to confirm their RSVP with the family');
+    await sparseTourPage.click('[data-tour="next"]');
+    await assertTourStep(sparseTourPage, 'notify', 'schedule');
+    assert(await sparseTourPage.locator('#tour-root').getAttribute('data-step-target') === '',
+      'hidden notification banner does not become the spotlight target');
+    await sparseTourPage.waitForFunction(() => document.querySelector('#tour-root [data-tour="spot"]')?.classList.contains('hidden'));
+    assert(await sparseTourPage.$eval('#tour-root [data-tour="spot"]', (el) => el.classList.contains('hidden')),
+      'subscribed users get centered notification guidance without a spotlight');
+    assert(await sparseTourPage.evaluate(() => window.__oneSignalPermissionRequests) === 0,
+      'notification guidance never requests permission');
+    await sparseTourPage.click('[data-tour="skip"]');
+    await sparseTourPage.waitForSelector('#tour-root', { state: 'detached' });
+    await sparseTourPage.close();
 
     console.log('Gate (signed out)');
     let page = await newPage(browser, backend);
@@ -267,11 +372,29 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     assert(marqueeMeasurement.shift >= marqueeMeasurement.required, 'marquee endpoint covers the complete current text overflow');
     await marqueePage.close();
 
-    console.log('One-time guided tour');
+    console.log('Role-specific Atithi tour');
     await page.waitForSelector('#tour-root [data-tour="card"]');
-    assert(await page.isVisible('text=Step 1 of'), 'tour starts for a Pending guest');
+    await assertTourStep(page, 'welcome', 'schedule');
     await page.click('[data-tour="next"]');
-    assert(await page.isVisible('text=Step 2 of'), 'tour advances');
+    await assertTourStep(page, 'schedule', 'schedule', '#view [data-tour="schedule-overview"]');
+    await page.click('[data-tour="next"]');
+    await assertTourStep(page, 'schedule-days', 'schedule');
+    await page.click('[data-tour="next"]');
+    await assertTourStep(page, 'notifications', 'notifications', '#view [data-tour="notifications-overview"]');
+    await page.click('[data-tour="back"]');
+    await assertTourStep(page, 'schedule-days', 'schedule');
+    await page.click('[data-tour="next"]');
+    await assertTourStep(page, 'notifications', 'notifications');
+    await page.click('[data-tour="next"]');
+    await assertTourStep(page, 'travel', 'travel', '#view [data-tour="travel-overview"]');
+    assert((await page.textContent('#tour-body')).includes('latest plan'),
+      'travel tour reminds Atithis to correct details that no longer match their plan');
+    await page.click('[data-tour="next"]');
+    await assertTourStep(page, 'notify', 'schedule');
+    await page.click('[data-tour="next"]');
+    await assertTourStep(page, 'profile', 'schedule', '#account-btn');
+    await page.click('[data-tour="next"]');
+    await assertTourStep(page, 'summary', 'schedule');
     await page.click('[data-tour="skip"]');
     await page.waitForSelector('#tour-root', { state: 'detached' });
     await page.waitForTimeout(200);
@@ -283,8 +406,12 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
 
     await page.click('[data-tab="notifications"]');
     await page.waitForSelector('#view >> text=Welcome is live');
+    backend.delayMs = 700;
     await page.click('[data-action="clear-notifications"]');
+    await page.waitForSelector('[data-action="clear-notifications"] .spinner');
+    assert(await page.isDisabled('[data-action="clear-notifications"]'), 'notification clear disables while pending');
     await page.waitForSelector('#view >> text=No announcements yet');
+    backend.delayMs = 0;
     assert(backend.notifications.length === 1, 'clear hides announcements for this member without deleting history');
 
     console.log('Guest sees their own pick-up & drop');
@@ -315,6 +442,36 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
 
     console.log('Admin manages group labels');
     await page.click('[data-tab="members"]');
+    backend.failNextAction = 'addGroup';
+    await page.fill('form[data-action="add-group"] input[name="label"]', 'Retry label');
+    await page.click('form[data-action="add-group"] button[type="submit"]');
+    await page.waitForSelector('#toast-root >> text=Simulated request failure.');
+    assert(await page.inputValue('form[data-action="add-group"] input[name="label"]') === 'Retry label',
+      'failed label submission preserves its draft');
+    assert(!(await page.isDisabled('form[data-action="add-group"] button[type="submit"]')),
+      'failed label submission restores the button');
+    backend.delayMs = 700;
+    await page.click('form[data-action="add-group"] button[type="submit"]');
+    await page.waitForSelector('form[data-action="add-group"] button[type="submit"] .spinner');
+    assert(await page.isDisabled('form[data-action="add-group"] button[type="submit"]'), 'label submit disables while pending');
+    assert(await page.getAttribute('form[data-action="add-group"] button[type="submit"]', 'aria-busy') === 'true' &&
+      (await page.textContent('form[data-action="add-group"] button[type="submit"] .sr-only')).includes('Working: Add'),
+    'pending label button remains named and announces its busy state');
+    assert(await page.inputValue('form[data-action="add-group"] input[name="label"]') === 'Retry label',
+      'pending label submission preserves its draft');
+    await page.waitForSelector('#view >> text=Retry label');
+    assert(await page.inputValue('form[data-action="add-group"] input[name="label"]') === '',
+      'successful label submission clears its draft');
+    backend.delayMs = 0;
+    await page.fill('form[data-action="add-group"] input[name="label"]', 'Submitted label');
+    backend.delayMs = 700;
+    await page.click('form[data-action="add-group"] button[type="submit"]');
+    await page.waitForSelector('form[data-action="add-group"] button[type="submit"] .spinner');
+    await page.fill('form[data-action="add-group"] input[name="label"]', 'Newer label draft');
+    await page.waitForSelector('#view >> text=Submitted label');
+    assert(await page.inputValue('form[data-action="add-group"] input[name="label"]') === 'Newer label draft',
+      'successful label submission preserves a newer draft entered while pending');
+    backend.delayMs = 0;
     await page.fill('form[data-action="add-group"] input[name="label"]', 'Family');
     await page.click('form[data-action="add-group"] button[type="submit"]');
     await page.waitForSelector('#view >> text=Family');
@@ -327,8 +484,12 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     await page.fill('form[data-action="add-group"] input[name="label"]', 'Cousins');
     await page.click('form[data-action="add-group"] button[type="submit"]');
     await page.waitForSelector('#view >> text=Cousins');
+    backend.delayMs = 700;
     await page.click('[data-action="archive-group"][data-label="Cousins"]');
+    await page.waitForSelector('[data-action="archive-group"][data-label="Cousins"] .spinner');
+    assert(await page.isDisabled('[data-action="archive-group"][data-label="Cousins"]'), 'archive button disables while pending');
     await page.waitForSelector('#view >> text=(archived)');
+    backend.delayMs = 0;
     assert(backend.groupCatalog.some((g) => g.label === 'Cousins' && g.status === 'Archived'), 'group label can be archived from Members & access');
 
     console.log('Admin creates a ceremony and an arrival from the app');
@@ -347,13 +508,41 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     await page.fill('#modal-root input[name="mapLink"]', 'https://maps.app.goo.gl/abc123');
     await page.check('#modal-root input[name="groups"][value="Family"]');
     await page.check('#modal-root input[name="groups"][value="Hosts"]');
+    backend.failNextAction = 'addEvent';
     await page.click('#modal-root [data-modal="confirm"]');
+    await page.waitForSelector('#toast-root >> text=Simulated request failure.');
+    assert(await page.isVisible('#modal-root [role="dialog"]') &&
+      await page.inputValue('#modal-root input[name="title"]') === 'Haldi' &&
+      await page.isChecked('#modal-root input[name="groups"][value="Hosts"]'),
+    'failed modal submission preserves its form draft');
+    backend.delayMs = 700;
+    await page.click('#modal-root [data-modal="confirm"]');
+    await page.waitForSelector('#modal-root [data-modal="confirm"] .spinner');
+    assert(await page.isDisabled('#modal-root [data-modal="confirm"]'), 'modal submit disables while pending');
+    assert(await page.inputValue('#modal-root input[name="title"]') === 'Haldi', 'pending modal submit preserves form values');
     await page.waitForSelector('#view >> text=Haldi');
+    backend.delayMs = 0;
     assert(backend.itinerary.some((e) => e.title === 'Haldi' && e.day === 'Sat, Jan 23' && e.time === '7:05 PM' && e.mapLink === 'https://maps.app.goo.gl/abc123' && e.groups.join() === 'Family,Hosts'), 'event created with date, map link and multiple audience groups');
     assert(!(await page.$('#modal-root [role="dialog"]')), 'create modal closed');
 
+    await page.uncheck('[data-action="event-groups"][data-id="2"][value="Hosts"]');
+    backend.delayMs = 700;
+    await page.click('[data-action="save-event-groups"][data-id="2"]');
+    await page.waitForSelector('[data-action="save-event-groups"][data-id="2"] .spinner');
+    assert(await page.isDisabled('[data-action="save-event-groups"][data-id="2"]'), 'event audience save disables while pending');
+    await page.waitForFunction(() => {
+      const button = document.querySelector('[data-action="save-event-groups"][data-id="2"]');
+      return button && !button.disabled;
+    });
+    backend.delayMs = 0;
+    assert(backend.itinerary.find((e) => e.id === '2').groups.join() === 'Family', 'event audience update saves selected groups');
+
+    backend.delayMs = 700;
     await page.click('[data-action="delete-event"][data-id="1"]');
+    await page.waitForSelector('[data-action="delete-event"][data-id="1"] .spinner');
+    assert(await page.isDisabled('[data-action="delete-event"][data-id="1"]'), 'delete button disables while pending');
     await page.waitForSelector('#view >> text=Welcome', { state: 'detached' });
+    backend.delayMs = 0;
     assert(!backend.itinerary.some((e) => e.title === 'Welcome') && backend.itinerary.find((e) => e.title === 'Haldi').id === '1', 'event deleted and later IDs shifted');
 
     await page.click('[data-action="add-event"]');
@@ -362,6 +551,12 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     await page.check('#modal-root input[name="groups"][value="Hosts"]');
     await page.click('#modal-root [data-modal="confirm"]');
     await page.waitForSelector('#view >> text=Hosts only');
+    backend.delayMs = 700;
+    await page.selectOption('select[data-action="set-status"][data-id="1"]', 'Completed');
+    await page.waitForSelector('[role="status"][aria-label="Updating event status"] .spinner');
+    assert(await page.isDisabled('select[data-action="set-status"][data-id="1"]'), 'event status select disables while pending');
+    await page.waitForFunction(() => document.querySelector('select[data-action="set-status"][data-id="1"]')?.value === 'Completed');
+    backend.delayMs = 0;
     await page.click('#refresh-btn');
     await page.waitForFunction(() => document.querySelector('#refresh-btn')?.getAttribute('aria-busy') === 'false');
     assert(await page.evaluate(() => {
@@ -408,8 +603,12 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     assert(verma.mode === 'Plane' && verma.arrival === '2027-01-22T14:30' && verma.email === 'viewer@gmail.com', 'travel edited, other fields kept');
     await page.click('[data-action="logistics-mode"][data-value="drop"]');
     await page.waitForSelector('[data-action="toggle-dropoff"][data-id="G2"]');
+    backend.delayMs = 700;
     await page.click('[data-action="toggle-dropoff"][data-id="G2"]');
+    await page.waitForSelector('[data-action="toggle-dropoff"][data-id="G2"] .spinner');
+    assert(await page.isDisabled('[data-action="toggle-dropoff"][data-id="G2"]'), 'drop status button disables while pending');
     await page.waitForSelector('[data-action="toggle-dropoff"][data-id="G2"][data-next="Pending"]');
+    backend.delayMs = 0;
     assert(backend.logistics.find((g) => g.id === 'G2').dropStatus === 'Dropped Off', 'drop marked done');
 
     await page.click('[data-tab="members"]');
@@ -419,8 +618,14 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     assert(await page.isDisabled('[data-action="remove-member"][data-email="admin@gmail.com"]'), 'own remove disabled');
     await page.check('input[data-action="member-groups"][data-email="viewer@gmail.com"][value="Family"]');
     await page.check('input[data-action="member-groups"][data-email="viewer@gmail.com"][value="Friends"]');
+    backend.delayMs = 700;
     await page.click('button[data-action="save-member-groups"][data-email="viewer@gmail.com"]');
+    await page.waitForSelector('button[data-action="save-member-groups"][data-email="viewer@gmail.com"] .spinner');
+    assert(await page.isDisabled('button[data-action="save-member-groups"][data-email="viewer@gmail.com"]'),
+      'member group save disables while pending');
     await page.waitForFunction(() => document.querySelector('input[data-action="member-groups"][data-email="viewer@gmail.com"][value="Friends"]')?.checked);
+    await page.waitForFunction(() => !document.querySelector('button[data-action="save-member-groups"][data-email="viewer@gmail.com"]')?.disabled);
+    backend.delayMs = 0;
     assert(backend.members.find((m) => m.email === 'viewer@gmail.com').groups.join() === 'Family,Friends', 'multiple member groups saved');
     const groupPage = await newPage(browser, backend);
     await groupPage.waitForSelector('#fake-gsi');
@@ -430,23 +635,95 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     assert(!(await groupPage.isVisible('#view >> text=Hosts only')), 'guest only sees ceremonies for their group and everyone');
     await groupPage.close();
 
+    console.log('Tour completion stays busy and can recover from an error');
+    const tourRetryBackend = makeBackend();
+    const tourRetryPage = await newPage(browser, tourRetryBackend);
+    await tourRetryPage.waitForSelector('#fake-gsi');
+    await signIn(tourRetryPage, 'viewer@gmail.com');
+    await enter(tourRetryPage);
+    await tourRetryPage.waitForSelector('#tour-root');
+    tourRetryBackend.failNextAction = 'completeTour';
+    tourRetryBackend.delayMs = 700;
+    await tourRetryPage.click('[data-tour="skip"]');
+    await tourRetryPage.waitForSelector('[data-tour="skip"] .spinner');
+    assert(await tourRetryPage.isDisabled('[data-tour="skip"]'), 'skip control disables while completion is pending');
+    await tourRetryPage.waitForSelector('#toast-root >> text=Simulated request failure.');
+    assert(await tourRetryPage.isVisible('#tour-root') &&
+      !(await tourRetryPage.isDisabled('[data-tour="skip"]')) &&
+      !(await tourRetryPage.evaluate(() => sessionStorage.getItem('evt.tour.viewer@gmail.com'))),
+    'failed completion keeps tour open and allows retry without a local completion marker');
+    tourRetryBackend.delayMs = 0;
+    await tourRetryPage.click('[data-tour="skip"]');
+    await tourRetryPage.waitForSelector('#tour-root', { state: 'detached' });
+    assert(tourRetryBackend.tourCalls.length === 2 && tourRetryBackend.members.find((m) => m.email === 'viewer@gmail.com').tourStatus === 'Skipped',
+      'completion retry records the first successful skip');
+    await tourRetryPage.close();
+
     await page.fill('#new-member-email', 'New.Guest@Gmail.com');
     await page.selectOption('form[data-action="add-member"] select[name="role"]', 'Atithi');
     await page.check('form[data-action="add-member"] input[name="groups"][value="Family"]');
+    backend.delayMs = 700;
     await page.click('form[data-action="add-member"] button[type="submit"]');
+    await page.waitForSelector('form[data-action="add-member"] button[type="submit"] .spinner');
+    assert(await page.isDisabled('form[data-action="add-member"] button[type="submit"]'), 'member invite disables while pending');
+    assert(await page.inputValue('#new-member-email') === 'New.Guest@Gmail.com' &&
+      await page.isChecked('form[data-action="add-member"] input[name="groups"][value="Family"]'),
+    'pending member invite preserves email and group draft');
+    await page.fill('#new-member-email', 'Another.Guest@Gmail.com');
+    await page.uncheck('form[data-action="add-member"] input[name="groups"][value="Family"]');
+    await page.check('form[data-action="add-member"] input[name="groups"][value="Friends"]');
     await page.waitForSelector('text=new.guest@gmail.com');
+    backend.delayMs = 0;
     assert(backend.members.some((m) => m.email === 'new.guest@gmail.com' && m.role === 'Atithi'), 'member added (lower-cased) as Atithi');
+    assert(await page.inputValue('#new-member-email') === 'Another.Guest@Gmail.com' &&
+      await page.isChecked('form[data-action="add-member"] input[name="groups"][value="Friends"]'),
+    'successful member invite preserves a newer draft entered while pending');
 
+    backend.delayMs = 700;
     await page.selectOption('select[data-email="new.guest@gmail.com"]', 'Admin');
+    await page.waitForSelector('select[data-email="new.guest@gmail.com"] + [role="status"] .spinner');
+    assert(await page.isDisabled('select[data-email="new.guest@gmail.com"]'), 'role select disables while pending');
     await page.waitForFunction(() => document.querySelector('select[data-email="new.guest@gmail.com"]')?.value === 'Admin');
+    backend.delayMs = 0;
     assert(backend.members.find((m) => m.email === 'new.guest@gmail.com').role === 'Admin', 'role changed to Admin');
 
+    backend.delayMs = 700;
     await page.click('[data-action="remove-member"][data-email="viewer@gmail.com"]');
+    await page.waitForSelector('[data-action="remove-member"][data-email="viewer@gmail.com"] .spinner');
+    assert(await page.isDisabled('[data-action="remove-member"][data-email="viewer@gmail.com"]'), 'remove button disables while pending');
     await page.waitForFunction(() => !document.querySelector('[data-action="remove-member"][data-email="viewer@gmail.com"]'));
+    backend.delayMs = 0;
     assert(!backend.members.some((m) => m.email === 'viewer@gmail.com'), 'member removed');
 
     assert(backend.audit.length >= 10 && backend.audit.every((a) => a.startsWith('admin@gmail.com|') && /\|\d{4}-\d\d-\d\dT/.test(a)),
       'every admin call carried userEmail + timestamp');
+
+    console.log('Background refresh stays quiet while explicit refresh remains visible');
+    backend.delayMs = 700;
+    const backgroundResponse = page.waitForResponse((response) => response.url().includes('script.google.com') &&
+      response.request().postData()?.includes('"action":"session"'));
+    const backgroundRequest = page.waitForRequest((request) => request.url().includes('script.google.com') &&
+      request.postData()?.includes('"action":"session"'));
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await backgroundRequest;
+    assert(await page.getAttribute('#refresh-btn', 'aria-busy') === 'false' &&
+      await page.textContent('#sync-indicator') !== 'Syncing…',
+    'visibility refresh does not show the global loading indicator');
+    assert(!(await page.$('form[data-action="add-group"] button .spinner')) &&
+      !(await page.$('[data-action="delete-event"] .spinner')),
+    'background refresh does not show mutation spinners');
+    await backgroundResponse;
+
+    await page.click('#refresh-btn');
+    await page.waitForFunction(() => document.querySelector('#refresh-btn')?.getAttribute('aria-busy') === 'true');
+    assert(await page.textContent('#sync-indicator') === 'Syncing…', 'explicit refresh keeps its existing loading indicator');
+    assert(!(await page.$('form[data-action="add-group"] button .spinner')) &&
+      !(await page.$('[data-action="delete-event"] .spinner')) &&
+    !(await page.$('[role="status"][aria-label="Updating event status"] .spinner')) &&
+    !(await page.$('[role="status"][aria-label="Updating member"] .spinner')),
+    'background refresh does not show mutation spinners');
+    await page.waitForFunction(() => document.querySelector('#refresh-btn')?.getAttribute('aria-busy') === 'false');
+    backend.delayMs = 0;
 
     console.log('Welcome plays again every time the app is opened');
     await page.reload();

@@ -64,7 +64,7 @@
         <button id="refresh-btn" type="button" aria-label="Refresh" title="Refresh" class="hidden w-10 h-10 grid place-items-center rounded-full hover:bg-white/10 active:bg-white/20">
           <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.6M20 20v-5h-.6M5.1 9A8 8 0 0119 8.5M18.9 15A8 8 0 015 15.5"/></svg>
         </button>
-        <button id="account-btn" type="button" aria-label="Your account" class="hidden flex items-center gap-2 rounded-full bg-white/10 hover:bg-white/20 ring-1 ring-haldi-300/40 pl-1 pr-3 py-1 text-xs font-semibold">
+        <button id="account-btn" data-tour="profile" type="button" aria-label="Your account" class="hidden flex items-center gap-2 rounded-full bg-white/10 hover:bg-white/20 ring-1 ring-haldi-300/40 pl-1 pr-3 py-1 text-xs font-semibold">
           <span id="account-avatar" class="w-7 h-7 rounded-full bg-haldi-300 text-kumkum-800 grid place-items-center text-xs font-bold overflow-hidden">?</span>
           <span id="account-label">Member</span>
         </button>
@@ -79,7 +79,7 @@
       You're offline. Showing the last saved schedule.
     </output>
 
-    <div id="banner-notify" class="hidden card mandala-watermark p-4 items-center gap-3">
+    <div id="banner-notify" data-tour="notification-opt-in" class="hidden card mandala-watermark p-4 items-center gap-3">
       <div class="w-11 h-11 shrink-0 rounded-full bg-marigold-100 grid place-items-center text-xl" aria-hidden="true">🔔</div>
       <div class="flex-1 min-w-0">
         <p class="font-semibold text-sm text-kumkum-800">Never miss a ceremony</p>

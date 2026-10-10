@@ -209,6 +209,7 @@
     epoch: 0, // bumped whenever the signed-in identity ends/changes; stale responses are dropped
     renewTimer: null,
     offlineExpiryTimer: null,
+    sessionRequest: null,
 
     clearOfflineExpiry() {
       clearTimeout(this.offlineExpiryTimer);
@@ -321,20 +322,36 @@
       void this.loadSession(!wasAuthed);
     },
 
-    async loadSession(announce = false) {
-      if (Store.state.loading && !announce) return;
+    async loadSession(announce = false, { showLoading = true } = {}) {
       const epoch = this.epoch;
-      const stale = () => epoch !== this.epoch;
-      Store.set({ loading: true });
-      try {
-        const data = await Api.post('session');
-        if (stale()) return;
-        this.applySession(data, announce);
-      } catch (err) {
-        if (!stale()) this.onSessionError(err);
-      } finally {
-        if (!stale()) Store.set({ loading: false });
+      const current = this.sessionRequest;
+      if (current?.epoch === epoch) {
+        if (announce) current.announce = true;
+        if (showLoading && !current.showLoading) {
+          current.showLoading = true;
+          Store.set({ loading: true });
+        }
+        return current.promise;
       }
+
+      const request = { epoch, announce, showLoading, promise: null };
+      this.sessionRequest = request;
+      if (request.showLoading) Store.set({ loading: true });
+      request.promise = (async () => {
+        try {
+          const data = await Api.post('session');
+          if (epoch !== this.epoch) return;
+          this.applySession(data, request.announce);
+        } catch (err) {
+          if (epoch === this.epoch) this.onSessionError(err);
+        } finally {
+          if (this.sessionRequest === request) {
+            this.sessionRequest = null;
+            Store.set({ loading: false });
+          }
+        }
+      })();
+      return request.promise;
     },
 
     applySession(data, announce) {
@@ -388,6 +405,7 @@
     clearSession(patch) {
       this.clearOfflineExpiry();
       this.epoch += 1;
+      this.sessionRequest = null;
       void Push.logout();
       Tour.cancel();
       Nudges.reset();
@@ -407,6 +425,7 @@
     handleExpired() {
       this.clearOfflineExpiry();
       this.epoch += 1;
+      this.sessionRequest = null;
       void Push.logout();
       sessionStore.remove(STORAGE.CREDENTIAL);
       // Admin-only data must not linger on screen after the session ends.
@@ -546,7 +565,8 @@
       }
       const btn = $('#notify-btn');
       btn.disabled = true;
-      btn.innerHTML = '<span class="spinner"></span>';
+      btn.setAttribute('aria-busy', 'true');
+      btn.innerHTML = '<span class="spinner" aria-hidden="true"></span><span class="sr-only">Requesting notifications</span>';
       try {
         await this.sdk.Notifications.requestPermission(); // triggers native browser prompt
         if (this.sdk.Notifications.permission && !this.sdk.User.PushSubscription.optedIn) {
@@ -556,6 +576,7 @@
       } catch (err) {
         Toast.show(`Could not enable notifications: ${err.message || err}`, 'error');
       } finally {
+        btn.removeAttribute('aria-busy');
         this.render();
       }
     },
@@ -855,13 +876,15 @@
 
   /* ----------------------------------------------------------------- Tour */
   // One-time coach-mark tour. Outcome (Completed/Skipped) is saved to the caller's
-  // row in the Members sheet so it never replays for that guest on any device.
+  // row in the Members sheet so it never replays for that member on any device.
   const Tour = {
     active: false,
     index: 0,
     steps: [],
     els: null,
     replay: false,
+    finishing: false,
+    currentTarget: '',
 
     doneKey(email) { return `evt.tour.${email}`; },
 
@@ -876,20 +899,33 @@
     buildSteps() {
       const s = Store.state;
       const name = escapeHtml(firstNameOf(s.user));
-      const all = [
-        { title: `Namaste, ${name} ji 🙏`, body: 'A quick 30-second walk-through so you never miss a moment of the celebration.' },
-        { target: '#tour-next-up', title: 'What’s next', body: 'The next ceremony is always pinned here — with the time and a map link to the venue.' },
-        { target: '#tour-days', title: 'All three days', body: 'Tap a day to jump straight to its programme.' },
-        { target: '#banner-notify:not(.hidden)', title: 'Never miss a ceremony', body: 'Turn on notifications and we’ll gently call you the moment an event begins.' },
-        { target: '#refresh-btn', title: 'Always up to date', body: 'The schedule refreshes by itself. Tap here any time for the very latest.' },
-        { target: '#account-btn', title: 'Your profile', body: 'See your details, replay this tour, or sign out.' },
-        { target: '[data-tab="control"]', admin: true, title: 'Event Control', body: 'Add ceremonies and mark one Live — guests get a push notification and you can share it on WhatsApp.' },
-        { target: '[data-tab="travel"]', guest: true, title: 'My travel', body: 'Your pick-up and drop, and whom to call if your plans change.' },
-        { target: '[data-tab="pickups"]', admin: true, title: 'Pick & Drop', body: 'Track every family’s arrival pick-up and departure drop, and edit their plans.' },
-        { target: '[data-tab="members"]', admin: true, title: 'Guests & access', body: 'Invite guests, make co-hosts admins, and remove access.' },
-        { title: 'You’re all set 🪔', body: 'We are so happy you are here. Enjoy every moment!' },
+      const steps = [
+        { id: 'welcome', tab: 'schedule', title: `Namaste, ${name} ji 🙏`, body: 'A quick walk-through of the places and tools that will help you enjoy the celebration.' },
+        { id: 'schedule', tab: 'schedule', targets: ['#view [data-tour="schedule-overview"]'], title: 'Your celebration schedule', body: 'The programme is arranged by day, highlights what is Live or Up next, and links each venue to its map.' },
+        { id: 'schedule-days', tab: 'schedule', targets: ['#view [data-tour="schedule-days"]', '#view [data-tour="schedule-overview"]'], title: 'Explore every day', body: 'When more than one day is listed, use the day buttons to jump between them. The schedule refreshes automatically.' },
+        { id: 'notifications', tab: 'notifications', targets: ['#view [data-tour="notifications-overview"]'], title: 'Host announcements', body: 'Live updates appear here. Clear hides them for your account without removing shared history.' },
       ];
-      return all.filter((st) => (!st.admin || s.isAdmin) && (!st.guest || !s.isAdmin) && (!st.target || this.visible(st.target)));
+      if (s.isAdmin) {
+        steps.push(
+          { id: 'event-control', tab: 'control', targets: ['#view [data-tour="event-control"]'], title: 'Event Control', body: 'Create ceremonies, choose their audience, then mark one Live to notify guests and prepare a WhatsApp broadcast.' },
+          { id: 'pick-drop', tab: 'pickups', targets: ['#view [data-tour="pick-drop-overview"]'], title: 'Pick-up and drop-off', body: 'Add and edit travel plans, switch between arrivals and departures, and track each family’s progress.' },
+          { id: 'members', tab: 'members', targets: ['#view [data-tour="members-overview"]'], title: 'Members & access', body: 'Invite Atithis, assign roles and group labels, and manage the available group labels.' },
+        );
+      } else {
+        steps.push({
+          id: 'travel', tab: 'travel', targets: ['#view [data-tour="travel-overview"]'],
+          title: 'Your travel plans',
+          body: s.myTravel.length
+            ? 'Check your arrival pick-up and departure drop here. If the details do not match your latest plan, contact the family shown on this screen.'
+            : 'Your arrival and departure details will appear here once the family adds them. If you need to confirm your RSVP, please contact the family.',
+        });
+      }
+      steps.push(
+        { id: 'notify', tab: 'schedule', targets: ['[data-tour="notification-opt-in"]'], title: 'Never miss a ceremony', body: 'Use the notification banner to opt in if it is shown. If it is hidden, notifications may already be enabled. This tour never opens a permission prompt.' },
+        { id: 'profile', tab: 'schedule', targets: ['#account-btn'], title: 'Your profile and help', body: 'See your account, replay this tour, open the install guide, or sign out.' },
+        { id: 'summary', tab: 'schedule', title: 'You’re all set 🪔', body: 'That is everything you need. Enjoy every moment of the celebration!' },
+      );
+      return steps;
     },
 
     visible(sel) {
@@ -899,6 +935,10 @@
       return r.width > 0 && r.height > 0;
     },
 
+    targetFor(step) {
+      return (step.targets || []).find((sel) => this.visible(sel)) || '';
+    },
+
     start({ replay = false } = {}) {
       if (this.active) return;
       if (Store.state.tab !== 'schedule') Store.set({ tab: 'schedule' });
@@ -906,6 +946,7 @@
       if (!this.steps.length) return;
       this.active = true;
       this.replay = replay;
+      this.finishing = false;
       this.index = 0;
 
       const root = document.createElement('div');
@@ -937,11 +978,11 @@
         shade: root.querySelector('[data-tour="shade"]'),
         card: root.querySelector('[data-tour="card"]'),
       };
-      root.querySelector('[data-tour="skip"]').addEventListener('click', () => this.finish('Skipped'));
+      root.querySelector('[data-tour="skip"]').addEventListener('click', (e) => { void this.finish('Skipped', e.currentTarget); });
       root.querySelector('[data-tour="back"]').addEventListener('click', () => this.go(this.index - 1));
       root.querySelector('[data-tour="next"]').addEventListener('click', () => this.go(this.index + 1));
       this.onKey = (e) => {
-        if (e.key === 'Escape') this.finish('Skipped');
+        if (e.key === 'Escape') { void this.finish('Skipped', root.querySelector('[data-tour="skip"]')); }
         else if (e.key === 'ArrowRight') this.go(this.index + 1);
         else if (e.key === 'ArrowLeft') this.go(this.index - 1);
       };
@@ -953,30 +994,44 @@
     },
 
     go(i) {
-      if (!this.active) return;
-      if (i >= this.steps.length) { this.finish('Completed'); return; }
+      if (!this.active || this.finishing) return;
+      if (i >= this.steps.length) { void this.finish('Completed', this.els.root.querySelector('[data-tour="next"]')); return; }
       this.index = Math.max(0, i);
       const step = this.steps[this.index];
       const { root } = this.els;
+      const previousTab = Store.state.tab;
+      if (step.tab && Store.state.tab !== step.tab) Store.set({ tab: step.tab });
       root.querySelector('#tour-title').innerHTML = step.title; // titles are escaped in buildSteps
       root.querySelector('#tour-body').textContent = step.body;
       root.querySelector('[data-tour="count"]').textContent = `Step ${this.index + 1} of ${this.steps.length}`;
+      root.dataset.stepId = step.id;
+      root.dataset.stepTab = step.tab || Store.state.tab;
       root.querySelector('[data-tour="back"]').classList.toggle('invisible', this.index === 0);
-      root.querySelector('[data-tour="next"]').textContent = this.index === this.steps.length - 1 ? 'Let’s begin' : 'Next';
+      const next = root.querySelector('[data-tour="next"]');
+      next.textContent = this.index === this.steps.length - 1 ? 'Finish tour' : 'Next';
+      next.dataset.idleText = next.textContent;
+      const targetSelector = this.targetFor(step);
+      root.dataset.stepTarget = targetSelector;
+      this.currentTarget = targetSelector;
       root.querySelector('[data-tour="dots"]').innerHTML = this.steps
         .map((_, n) => `<span class="h-1.5 rounded-full transition-all ${n === this.index ? 'w-5 bg-kumkum-600' : 'w-1.5 bg-haldi-300'}"></span>`).join('');
-      const target = step.target && $(step.target);
-      if (target) target.scrollIntoView({ block: 'center', behavior: reducedMotion() ? 'auto' : 'smooth' });
-      this.position();
-      setTimeout(() => this.position(), 380);
-      root.querySelector('[data-tour="next"]').focus({ preventScroll: true });
+      const index = this.index;
+      const positionStep = () => {
+        if (!this.active || this.index !== index) return;
+        const target = this.currentTarget && $(this.currentTarget);
+        if (target) target.scrollIntoView({ block: 'center', behavior: reducedMotion() ? 'auto' : 'smooth' });
+        this.position();
+        setTimeout(() => { if (this.active && this.index === index) this.position(); }, 380);
+      };
+      if (previousTab !== Store.state.tab) requestAnimationFrame(positionStep);
+      else positionStep();
+      next.focus({ preventScroll: true });
     },
 
     position() {
       if (!this.active) return;
-      const step = this.steps[this.index];
       const { spot, shade, card } = this.els;
-      const target = step.target && $(step.target);
+      const target = this.currentTarget && $(this.currentTarget);
       if (!target) {
         spot.classList.add('hidden');
         shade.classList.remove('hidden');
@@ -996,27 +1051,60 @@
       card.style.top = below ? `${r.bottom + 16}px` : `${Math.max(12, r.top - card.offsetHeight - 16)}px`;
     },
 
-    finish(status) {
-      if (!this.active) return;
+    setControlBusy(button, busy) {
+      if (!button) return;
+      const idleText = button.dataset.idleText || button.textContent.trim();
+      button.dataset.idleText = idleText;
+      button.disabled = busy;
+      button.setAttribute('aria-busy', String(busy));
+      if (busy) {
+        button.setAttribute('aria-label', 'Saving tour progress');
+        button.innerHTML = '<span class="spinner" aria-hidden="true"></span><span class="sr-only">Saving tour progress</span>';
+      } else {
+        button.removeAttribute('aria-label');
+        button.textContent = idleText;
+      }
+    },
+
+    close() {
       this.active = false;
       document.removeEventListener('keydown', this.onKey);
       window.removeEventListener('resize', this.onLayout);
       window.removeEventListener('scroll', this.onLayout);
       this.els?.root.remove();
       this.els = null;
-      if (this.replay) return;
+      this.currentTarget = '';
+      this.finishing = false;
+    },
+
+    async finish(status, button) {
+      if (!this.active || this.finishing) return;
+      if (this.replay) {
+        this.close();
+        this.replay = false;
+        return;
+      }
       const s = Store.state;
-      if (!s.user) return;
+      if (!s.user) { this.close(); return; }
+      const email = s.user.email;
+      this.finishing = true;
+      this.setControlBusy(button, true);
+      const result = await Actions.run('tour:complete', () => Api.post('completeTour', { status }));
+      if (!result) {
+        this.finishing = false;
+        this.setControlBusy(button, false);
+        return;
+      }
+      if (!this.active || Store.state.user?.email !== email) return;
       sessionStore.set(this.doneKey(s.user.email), status);
       Store.set({ tourStatus: status });
+      this.close();
       if (status === 'Completed') { Festive.petals(18); Toast.show('Wonderful! Enjoy the celebration 🌼', 'success'); }
-      // Fire-and-forget: if it fails, the session flag still prevents a replay on this device.
-      Api.post('completeTour', { status }).catch(() => {});
     },
 
     cancel() { // sign-out / identity change: close without recording anything
-      this.replay = true;
-      this.finish('Skipped');
+      this.close();
+      this.replay = false;
     },
   };
 
@@ -1034,7 +1122,10 @@
   const badge = (status) => `<span class="inline-flex shrink-0 items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold ring-1 ${STATUS_STYLES[status] || STATUS_STYLES.Upcoming}">
       ${status === 'Live' ? '<span class="w-1.5 h-1.5 rounded-full bg-ivory-50 animate-pulse"></span>' : ''}${escapeHtml(STATUS_LABEL[status] || status)}</span>`;
 
-  const spinnerOr = (key, label) => (Store.isPending(key) ? '<span class="spinner"></span>' : label);
+  const pendingAttrs = (key) => (Store.isPending(key) ? 'aria-busy="true"' : '');
+  const spinnerOr = (key, label) => (Store.isPending(key)
+    ? `<span class="spinner" aria-hidden="true"></span><span class="sr-only">Working: ${label}</span>`
+    : label);
 
   const emptyState = (icon, title, text = '') => `
     <div class="card relative overflow-hidden text-center py-12 px-6">
@@ -1044,8 +1135,8 @@
       ${text ? `<p class="relative text-sm text-ink-500 mt-1">${escapeHtml(text)}</p>` : ''}
     </div>`;
 
-  const pageHeader = (eyebrow, title, text = '') => `
-    <header class="mb-4">
+  const pageHeader = (eyebrow, title, text = '', tour = '') => `
+    <header ${tour ? `data-tour="${tour}"` : ''} class="mb-4">
       <p class="eyebrow">${eyebrow}</p>
       <h2 class="section-title">${title}</h2>
       ${text ? `<p class="text-sm text-ink-500 mt-1">${text}</p>` : ''}
@@ -1074,7 +1165,7 @@
       const done = s.itinerary.filter((e) => e.status === 'Completed').length;
       const pct = total ? Math.round((done / total) * 100) : 0;
       return `
-        <section class="card relative overflow-hidden p-5 bg-gradient-to-br from-ivory-50 via-haldi-50 to-marigold-50">
+        <section data-tour="schedule-overview" class="card relative overflow-hidden p-5 bg-gradient-to-br from-ivory-50 via-haldi-50 to-marigold-50">
           <div class="mandala-layer mandala-hero" aria-hidden="true"></div>
           <p class="relative eyebrow"><span lang="hi">${g.hi}</span> · ${g.en}</p>
           <h2 class="relative mt-1 font-display text-2xl text-kumkum-700">Namaste, ${escapeHtml(firstNameOf(s.user))} ji 🙏</h2>
@@ -1154,7 +1245,7 @@
       const live = s.itinerary.filter((e) => e.status === 'Live');
       const days = Object.entries(groupByDay(s.itinerary));
       const chips = days.length > 1 ? `
-        <nav id="tour-days" aria-label="Jump to day" class="flex gap-2 overflow-x-auto no-scrollbar -mx-1 px-1 py-1">
+        <nav id="tour-days" data-tour="schedule-days" aria-label="Jump to day" class="flex gap-2 overflow-x-auto no-scrollbar -mx-1 px-1 py-1">
           ${days.map(([day, events], i) => {
             const hasLive = events.some((e) => e.status === 'Live');
             const allDone = events.every((e) => e.status === 'Completed');
@@ -1235,7 +1326,7 @@
     },
   };
 
-  const groupPicker = (catalog, selected, action, identity = {}) => {
+  const groupPicker = (catalog, selected, action, identity = {}, busy = false) => {
     const chosen = new Set(selected.map((label) => label.toLowerCase()));
     const groups = catalog.filter((group) => group.status === 'Active' || chosen.has(group.label.toLowerCase()));
     if (!groups.length) return '<p class="text-xs text-ink-500">No groups yet. Add labels in Members &amp; access.</p>';
@@ -1248,7 +1339,7 @@
           <input type="checkbox" name="groups" value="${escapeHtml(group.label)}" data-action="${action}"
             ${identity.id ? `data-id="${escapeHtml(identity.id)}"` : ''}
             ${identity.email ? `data-email="${escapeHtml(identity.email)}"` : ''}
-            ${checked ? 'checked' : ''} ${archived && !checked ? 'disabled' : ''}
+            ${checked ? 'checked' : ''} ${busy || (archived && !checked) ? 'disabled' : ''}
             class="h-4 w-4 accent-kumkum-700" />
           <span>${escapeHtml(group.label)}${archived ? ' <span class="text-[11px]">(archived)</span>' : ''}</span>
         </label>`;
@@ -1260,7 +1351,7 @@
     <button data-action="${action}" class="btn btn-primary w-full mb-4">＋ ${label}</button>`;
 
   Views.control = (s) => {
-    const header = pageHeader('Host console', 'Event Control', '<b>Set Live &amp; Broadcast</b> updates the sheet, notifies the intended audience and opens WhatsApp with a ready-to-send message.');
+    const header = pageHeader('Host console', 'Event Control', '<b>Set Live &amp; Broadcast</b> updates the sheet, notifies the intended audience and opens WhatsApp with a ready-to-send message.', 'event-control');
     if (!s.itinerary.length) {
       return `${header}${addButton('add-event', 'Add a ceremony')}${emptyState('🎛️', 'No ceremonies yet', 'Add the first ceremony of the celebration above.')}`;
     }
@@ -1271,6 +1362,7 @@
         ${s.itinerary.map((e) => {
           const key = `event:${e.id}`;
           const busy = Store.isPending(key);
+          const groupsBusy = Store.isPending(`event-groups:${e.id}`);
           return `
           <article class="card p-4 ${e.status === 'Live' ? 'ring-2 ring-kumkum-400' : ''}">
             <div class="flex items-start justify-between gap-2">
@@ -1283,18 +1375,21 @@
               ${badge(e.status)}
             </div>
             <div class="mt-3 grid grid-cols-2 gap-2">
-              <button data-action="open-broadcast" data-id="${escapeHtml(e.id)}" ${busy ? 'disabled' : ''} class="btn btn-live col-span-2">
+              <button data-action="open-broadcast" data-id="${escapeHtml(e.id)}" ${busy ? 'disabled' : ''} ${pendingAttrs(key)} class="btn btn-live col-span-2">
                 ${spinnerOr(key, e.status === 'Live' ? '📣 Re-announce &amp; Broadcast' : '🪔 Set Live &amp; Broadcast')}
               </button>
               <button data-action="share-whatsapp" data-id="${escapeHtml(e.id)}" class="btn btn-whatsapp btn-sm">Share to WhatsApp</button>
-              <select data-action="set-status" data-id="${escapeHtml(e.id)}" aria-label="Change status of ${escapeHtml(e.title)}" ${busy ? 'disabled' : ''} class="input py-2 text-sm">
-                ${['Upcoming', 'Live', 'Completed'].map((st) => `<option value="${st}" ${st === e.status ? 'selected' : ''}>${st}</option>`).join('')}
-              </select>
-              <button data-action="delete-event" data-id="${escapeHtml(e.id)}" ${busy ? 'disabled' : ''} aria-label="Delete ${escapeHtml(e.title)}"
-                class="btn btn-ghost btn-sm col-span-2 min-h-[44px] text-kumkum-700">🗑 Delete ceremony</button>
+              <div class="flex min-w-0 items-center gap-2">
+                <select data-action="set-status" data-id="${escapeHtml(e.id)}" aria-label="Change status of ${escapeHtml(e.title)}" ${busy ? 'disabled' : ''} class="input flex-1 py-2 text-sm">
+                  ${['Upcoming', 'Live', 'Completed'].map((st) => `<option value="${st}" ${st === e.status ? 'selected' : ''}>${st}</option>`).join('')}
+                </select>
+                ${busy ? '<span role="status" aria-label="Updating event status"><span class="spinner" aria-hidden="true"></span><span class="sr-only">Updating event status</span></span>' : ''}
+              </div>
+              <button data-action="delete-event" data-id="${escapeHtml(e.id)}" ${busy ? 'disabled' : ''} ${pendingAttrs(key)} aria-label="Delete ${escapeHtml(e.title)}"
+                class="btn btn-ghost btn-sm col-span-2 min-h-[44px] text-kumkum-700">${spinnerOr(key, '🗑 Delete ceremony')}</button>
               <div class="col-span-2 block text-xs font-semibold text-ink-500">Audience groups (no selection = everyone)
-                ${groupPicker(s.groupCatalog, s.eventGroupsDrafts[e.id] ?? (e.groups || []), 'event-groups', { id: e.id })}
-                <button data-action="save-event-groups" data-id="${escapeHtml(e.id)}" class="btn btn-ghost btn-sm mt-2 min-h-[44px]">Save audience</button>
+                ${groupPicker(s.groupCatalog, s.eventGroupsDrafts[e.id] ?? (e.groups || []), 'event-groups', { id: e.id }, groupsBusy)}
+                <button data-action="save-event-groups" data-id="${escapeHtml(e.id)}" ${groupsBusy ? 'disabled' : ''} ${pendingAttrs(`event-groups:${e.id}`)} class="btn btn-ghost btn-sm mt-2 min-h-[44px]">${spinnerOr(`event-groups:${e.id}`, 'Save audience')}</button>
               </div>
             </div>
           </article>`;
@@ -1363,7 +1458,7 @@
             </dl>
             <div class="grid grid-cols-[auto_1fr] gap-2 mt-3">
               <button data-action="edit-pickup" data-id="${escapeHtml(g.id)}" class="btn btn-ghost px-4" aria-label="Edit ${escapeHtml(g.name)}">✎ Edit</button>
-              <button data-action="${mode.action}" data-id="${escapeHtml(g.id)}" data-next="${finished ? 'Pending' : mode.done}" ${Store.isPending(key) ? 'disabled' : ''}
+              <button data-action="${mode.action}" data-id="${escapeHtml(g.id)}" data-next="${finished ? 'Pending' : mode.done}" ${Store.isPending(key) ? 'disabled' : ''} ${pendingAttrs(key)}
                 class="btn ${finished ? 'btn-ghost' : 'btn-primary'}">
                 ${spinnerOr(key, finished ? '↩︎ Mark as Pending' : mode.doneLabel)}
               </button>
@@ -1373,7 +1468,7 @@
       </div>`;
 
     return `
-      ${pageHeader('Arrivals &amp; departures', 'Pick &amp; Drop')}
+      ${pageHeader('Arrivals &amp; departures', 'Pick &amp; Drop', '', 'pick-drop-overview')}
       <div class="flex gap-2 mb-3" role="tablist" aria-label="Pick-up or drop">${modeTab('pickup', '🚐 Pick-up')}${modeTab('drop', '🧳 Drop')}</div>
       ${addButton('add-pickup', 'Add a guest’s travel')}
       <div class="card p-4 mb-3">
@@ -1408,15 +1503,15 @@
         </div>
       </div>`;
 
-    if (s.authStatus === 'offline') return `${pageHeader('Your journey', 'My travel')}${emptyState('📶', 'You’re offline', 'Connect to the internet to see your pick-up and drop.')}${contactCard}`;
+    if (s.authStatus === 'offline') return `${pageHeader('Your journey', 'My travel', '', 'travel-overview')}${emptyState('📶', 'You’re offline', 'Connect to the internet to see your pick-up and drop.')}${contactCard}`;
     if (!s.myTravel.length) {
       return `
-        ${pageHeader('Your journey', 'My travel')}
+        ${pageHeader('Your journey', 'My travel', '', 'travel-overview')}
         ${emptyState('🚐', 'No travel plans yet', 'Once the family adds your arrival, your pick-up and drop will show up here.')}
         ${contactCard}`;
     }
     return `
-      ${pageHeader('Your journey', 'My travel', 'We will be there to receive you and to see you off. 🌼')}
+      ${pageHeader('Your journey', 'My travel', 'We will be there to receive you and to see you off. 🌼', 'travel-overview')}
       <div class="space-y-3">
         ${s.myTravel.map((g) => `
           <article class="card p-4 space-y-3">
@@ -1453,6 +1548,7 @@
         ${list.map((m) => {
           const self = m.email === me;
           const busy = Store.isPending(`member:${m.email}`);
+          const groupsBusy = Store.isPending(`member-groups:${m.email}`);
           const lastAdmin = m.role === 'Admin' && adminCount <= 1;
           return `
           <li class="flex items-center gap-3 p-3">
@@ -1461,36 +1557,37 @@
               <p class="text-sm font-medium text-ink-900 truncate">${escapeHtml(m.email)} ${self ? '<span class="ml-1 rounded-full bg-kumkum-600 text-ivory-50 text-[10px] px-2 py-0.5">You</span>' : ''}</p>
               <p class="text-xs text-ink-400 truncate">Added by ${escapeHtml(m.addedBy || '—')}${addedLine(m)} ${tourChip(m.tourStatus)}</p>
               <label class="block mt-2 text-[11px] text-ink-500">Groups
-                ${groupPicker(s.groupCatalog, s.memberGroupsDrafts[m.email] ?? (m.groups || []), 'member-groups', { email: m.email })}
+                ${groupPicker(s.groupCatalog, s.memberGroupsDrafts[m.email] ?? (m.groups || []), 'member-groups', { email: m.email }, groupsBusy)}
               </label>
-              <button data-action="save-member-groups" data-email="${escapeHtml(m.email)}" class="btn btn-ghost btn-sm mt-1 min-h-[40px]">Save groups</button>
+              <button data-action="save-member-groups" data-email="${escapeHtml(m.email)}" ${groupsBusy ? 'disabled' : ''} ${pendingAttrs(`member-groups:${m.email}`)} class="btn btn-ghost btn-sm mt-1 min-h-[40px]">${spinnerOr(`member-groups:${m.email}`, 'Save groups')}</button>
             </div>
             <select data-action="set-role" data-email="${escapeHtml(m.email)}" aria-label="Role for ${escapeHtml(m.email)}" ${self || busy || lastAdmin ? 'disabled' : ''}
               title="${lockReason(self, lastAdmin, 'You cannot change your own role', 'Change role')}"
               class="shrink-0 rounded-lg border border-haldi-300 bg-ivory-50 text-xs px-2 py-1.5 disabled:opacity-50">${roleOptions(m.role)}</select>
-            <button data-action="remove-member" data-email="${escapeHtml(m.email)}" ${self || busy || lastAdmin ? 'disabled' : ''}
+            ${busy ? '<span role="status" aria-label="Updating member"><span class="spinner" aria-hidden="true"></span><span class="sr-only">Updating member</span></span>' : ''}
+            <button data-action="remove-member" data-email="${escapeHtml(m.email)}" ${self || busy || lastAdmin ? 'disabled' : ''} ${pendingAttrs(`member:${m.email}`)}
               title="${lockReason(self, lastAdmin, 'You cannot remove yourself', 'Remove member')}" aria-label="Remove ${escapeHtml(m.email)}"
               class="btn btn-danger btn-sm shrink-0">
-              ${busy ? '<span class="spinner"></span>' : 'Remove'}
+              ${busy ? '<span class="spinner" aria-hidden="true"></span><span class="sr-only">Working: Remove member</span>' : 'Remove'}
             </button>
           </li>`;
         }).join('')}
       </ul>`;
 
     return `
-      ${pageHeader('Guest list', 'Members &amp; access', 'Only people on this list can open the app. <b>Admins</b> host the event; <b>Atithis</b> (our guests) follow the schedule. Every change is recorded in the AuditLog.')}
+      ${pageHeader('Guest list', 'Members &amp; access', 'Only people on this list can open the app. <b>Admins</b> host the event; <b>Atithis</b> (our guests) follow the schedule. Every change is recorded in the AuditLog.', 'members-overview')}
       <div class="grid grid-cols-3 gap-2 text-center mb-4">${stat(s.members.length, 'Members')}${stat(adminCount, 'Admins')}${stat(s.members.length - adminCount, 'Atithis')}</div>
       <section class="card p-4 mb-4">
         <h3 class="font-display text-xl text-kumkum-700">Group labels</h3>
         <p class="mt-1 text-xs text-ink-500">Create labels for member access and ceremony audiences. Archiving keeps current assignments but prevents new ones.</p>
         <form data-action="add-group" class="mt-3 flex gap-2" novalidate>
           <input name="label" maxlength="30" required placeholder="e.g. Family" aria-label="New group label" class="input min-w-0" />
-          <button type="submit" ${Store.isPending('group:add') ? 'disabled' : ''} class="btn btn-primary shrink-0">${spinnerOr('group:add', 'Add')}</button>
+          <button type="submit" ${Store.isPending('group:add') ? 'disabled' : ''} ${pendingAttrs('group:add')} class="btn btn-primary shrink-0">${spinnerOr('group:add', 'Add')}</button>
         </form>
         ${s.groupCatalog.length ? `<ul class="mt-3 divide-y divide-haldi-100">
           ${s.groupCatalog.map((group) => `<li class="flex min-h-[48px] items-center justify-between gap-2 py-2">
             <span class="text-sm text-ink-800">${escapeHtml(group.label)} ${group.status === 'Archived' ? '<span class="text-xs text-ink-500">(archived)</span>' : ''}</span>
-            ${group.status === 'Active' ? `<button type="button" data-action="archive-group" data-label="${escapeHtml(group.label)}" class="btn btn-ghost btn-sm min-h-[44px]">Archive</button>` : ''}
+            ${group.status === 'Active' ? `<button type="button" data-action="archive-group" data-label="${escapeHtml(group.label)}" ${Store.isPending(`group:${group.label}`) ? 'disabled' : ''} ${pendingAttrs(`group:${group.label}`)} class="btn btn-ghost btn-sm min-h-[44px]">${spinnerOr(`group:${group.label}`, 'Archive')}</button>` : ''}
           </li>`).join('')}
         </ul>` : emptyState('🏷️', 'No group labels yet', 'Add a label to make it available in member and ceremony forms.')}
       </section>
@@ -1499,7 +1596,7 @@
         <input id="new-member-email" name="email" type="email" inputmode="email" autocomplete="off" required placeholder="guest@gmail.com" class="input" />
         <div class="flex gap-2">
           <select name="role" aria-label="Role" class="input flex-1">${roleOptions(GUEST_ROLE)}</select>
-          <button type="submit" ${Store.isPending('member:add') ? 'disabled' : ''} class="btn btn-primary shrink-0 px-6">
+          <button type="submit" ${Store.isPending('member:add') ? 'disabled' : ''} ${pendingAttrs('member:add')} class="btn btn-primary shrink-0 px-6">
             ${spinnerOr('member:add', 'Add')}
           </button>
         </div>
@@ -1514,10 +1611,10 @@
   Views.notifications = (s) => {
     const items = s.notifications || [];
     return `
-      ${pageHeader('Announcements from the hosts', 'Notifications')}
+      ${pageHeader('Announcements from the hosts', 'Notifications', '', 'notifications-overview')}
       <section class="card p-4 mb-3">
         <p class="text-sm text-ink-600">Announcements sent from Event Control Center appear here.</p>
-        <button data-action="clear-notifications" ${!items.length || Store.isPending('notifications:clear') ? 'disabled' : ''} class="btn btn-ghost btn-sm mt-3 min-h-[44px]">
+        <button data-action="clear-notifications" ${!items.length || Store.isPending('notifications:clear') ? 'disabled' : ''} ${pendingAttrs('notifications:clear')} class="btn btn-ghost btn-sm mt-3 min-h-[44px]">
           ${spinnerOr('notifications:clear', 'Clear notifications')}
         </button>
       </section>
@@ -1622,6 +1719,8 @@
     const caret = focusKey && typeof active.selectionStart === 'number' ? active.selectionStart : null;
     const before = memberFormFields();
     const draft = before ? { email: before.email.value, role: before.role.value, groups: checkedGroups(before.form), focused: active === before.email } : null;
+    const groupInput = $('form[data-action="add-group"] input[name="label"]');
+    const groupDraft = groupInput ? { value: groupInput.value, focused: active === groupInput } : null;
 
     $('#view').innerHTML = (Views[s.tab] || Views.schedule)(s);
     applyProgressWidths();
@@ -1633,6 +1732,11 @@
       const selectedGroups = new Set(draft.groups);
       after.form.querySelectorAll('input[name="groups"]').forEach((checkbox) => { checkbox.checked = selectedGroups.has(checkbox.value); });
       if (draft.focused) after.email.focus();
+    }
+    const nextGroupInput = $('form[data-action="add-group"] input[name="label"]');
+    if (nextGroupInput && groupDraft) {
+      nextGroupInput.value = groupDraft.value;
+      if (groupDraft.focused) nextGroupInput.focus();
     }
     if (['pickup-search', 'member-search'].includes(focusKey)) {
       const el = $(`[data-action="${focusKey}"]`);
@@ -1668,7 +1772,7 @@
   const Data = {
     timer: null,
 
-    refresh() {
+    refresh({ quiet = false } = {}) {
       if (Store.state.authStatus === 'offline' && navigator.onLine) {
         Auth.clearOfflineExpiry();
         const saved = sessionStore.get(STORAGE.CREDENTIAL);
@@ -1676,7 +1780,7 @@
         Store.set({ authStatus: 'authed', user: saved });
       }
       if (Store.state.authStatus !== 'authed') return null;
-      return Auth.loadSession();
+      return Auth.loadSession(false, { showLoading: !quiet });
     },
 
     /** Self-rescheduling poll with ±20% jitter so many open phones don't hit Apps Script in lock-step. */
@@ -1685,7 +1789,7 @@
       const base = Math.max(Number(CONFIG.REFRESH_INTERVAL_MS) || 60000, 15000);
       const tick = () => {
         this.timer = setTimeout(() => {
-          if (document.visibilityState === 'visible' && navigator.onLine) void this.refresh();
+          if (document.visibilityState === 'visible' && navigator.onLine) void this.refresh({ quiet: true });
           tick();
         }, base * (0.8 + Math.random() * 0.4));
       };
@@ -1824,22 +1928,42 @@
 
     async addMember(form) {
       const { email: input, role: roleSelect } = memberFormFields(form);
-      const email = input.value.trim().toLowerCase();
+      const submittedEmail = input.value;
+      const email = submittedEmail.trim().toLowerCase();
       const role = roleSelect.value;
       const groups = checkedGroups(form);
       if (email.length > 254 || !EMAIL_RE.test(email)) { Toast.show('Enter a valid email address.', 'error'); input.focus(); return; }
       if (!ROLES.includes(role)) { Toast.show('Choose a valid role.', 'error'); return; }
       if (Store.state.members.some((m) => m.email === email)) { Toast.show(`${email} is already a member.`, 'info'); return; }
       const data = await this.run('member:add', () => Api.post('addMember', { email, role, groups }), `${email} added as ${role}`);
-      if (data) { input.value = ''; form.querySelectorAll('input[name="groups"]').forEach((checkbox) => { checkbox.checked = false; }); Store.set({ members: data.members }); }
+      if (data) {
+        const currentForm = $('form[data-action="add-member"]');
+        if (currentForm) {
+          const currentFields = memberFormFields(currentForm);
+          const currentGroups = checkedGroups(currentForm);
+          const submittedDraftUnchanged = currentFields.email.value === submittedEmail &&
+            currentGroups.length === groups.length &&
+            currentGroups.every((group, index) => group === groups[index]);
+          if (submittedDraftUnchanged) {
+            currentFields.email.value = '';
+            currentForm.querySelectorAll('input[name="groups"]').forEach((checkbox) => { checkbox.checked = false; });
+          }
+        }
+        Store.set({ members: data.members });
+      }
     },
 
     async addGroup(form) {
       const input = form.querySelector('input[name="label"]');
-      const label = input.value.trim();
+      const submittedLabel = input.value;
+      const label = submittedLabel.trim();
       if (!label) { Toast.show('Enter a group label.', 'error'); input.focus(); return; }
       const data = await this.run('group:add', () => Api.post('addGroup', { label }), `Group "${label}" added`);
-      if (data) { input.value = ''; Store.set({ groupCatalog: data.groupCatalog }); }
+      if (data) {
+        const currentInput = $('form[data-action="add-group"] input[name="label"]');
+        if (currentInput?.value === submittedLabel) currentInput.value = '';
+        Store.set({ groupCatalog: data.groupCatalog });
+      }
     },
 
     async archiveGroup(label) {
@@ -1883,10 +2007,12 @@
             const payload = collect(form);
             if (!payload) return;
             confirm.disabled = true;
-            confirm.innerHTML = '<span class="spinner"></span>';
+            confirm.setAttribute('aria-busy', 'true');
+            confirm.innerHTML = `<span class="spinner" aria-hidden="true"></span><span class="sr-only">Working: ${escapeHtml(submitLabel)}</span>`;
             const ok = await submit(payload, key);
             if (ok) { Modal.close(); return; }
             confirm.disabled = false;
+            confirm.removeAttribute('aria-busy');
             confirm.textContent = submitLabel;
           });
           mount?.(form);
@@ -2167,7 +2293,7 @@
     });
 
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !Tour.active && !Welcome.open) Modal.close(); });
-    window.addEventListener('online', () => { Store.set({ online: true }); void Data.refresh(); });
+    window.addEventListener('online', () => { Store.set({ online: true }); void Data.refresh({ quiet: true }); });
     window.addEventListener('offline', () => {
       Store.set({ online: false });
       if (Store.state.authStatus === 'authed' && !Auth.restoreOffline()) {
@@ -2178,7 +2304,7 @@
       }
     });
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') { void Data.refresh(); Push.render(); }
+      if (document.visibilityState === 'visible') { void Data.refresh({ quiet: true }); Push.render(); }
     });
   }
 
