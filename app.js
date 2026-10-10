@@ -1610,7 +1610,7 @@
     const roleOptions = (current) => ROLES.map((r) => `<option value="${r}" ${r === current ? 'selected' : ''}>${r}</option>`).join('');
     const stat = (n, label) => `<div class="card py-2"><p class="font-display text-xl text-kumkum-700">${n}</p><p class="text-[11px] text-ink-500">${label}</p></div>`;
     const TOUR_CHIP = { Completed: '· toured ✓', Skipped: '· tour skipped' };
-    const tourChip = (t) => TOUR_CHIP[t] || '· not visited yet';
+    const tourChip = (t) => TOUR_CHIP[t] || '· app tour pending';
     const empty = emptyState('👥', s.members.length ? 'No matching members' : 'No members yet');
     const lockReason = (self, lastAdmin, selfText, fallback) => {
       if (self) return selfText;
@@ -1630,7 +1630,7 @@
             <div class="w-9 h-9 shrink-0 rounded-full ${m.role === 'Admin' ? 'bg-kumkum-100 text-kumkum-700' : 'bg-haldi-100 text-haldi-800'} grid place-items-center font-bold">${escapeHtml(m.email[0]?.toUpperCase() || '?')}</div>
             <div class="flex-1 min-w-0">
               <p class="text-sm font-medium text-ink-900 truncate">${escapeHtml(m.email)} ${self ? '<span class="ml-1 rounded-full bg-kumkum-600 text-ivory-50 text-[10px] px-2 py-0.5">You</span>' : ''}</p>
-              <p class="text-xs text-ink-400 truncate">Added by ${escapeHtml(m.addedBy || '—')}</p>
+              <p class="text-xs text-ink-400 truncate">· Added by ${escapeHtml(m.addedBy || '—')}</p>
               <p class="text-xs text-ink-400 truncate">${addedLine(m)}</p>
               <p class="text-xs text-ink-400 truncate"> ${tourChip(m.tourStatus)}</p>
               <label class="block mt-2 text-[11px] text-ink-500">Groups
