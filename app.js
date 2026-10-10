@@ -416,7 +416,9 @@
       if (!this.supported) return 'unsupported';
       if (Notification.permission === 'denied') return 'denied';
       if (!this.sdk) return this.failed ? 'failed' : 'loading';
-      if (this.sdk.Notifications.permission && this.sdk.User.PushSubscription.optedIn) return 'subscribed';
+      // optedIn alone isn't enough: without an id OneSignal never registered the device (e.g. wrong SW path).
+      const sub = this.sdk.User.PushSubscription;
+      if (this.sdk.Notifications.permission && sub.optedIn && sub.id) return 'subscribed';
       return 'prompt';
     },
 
