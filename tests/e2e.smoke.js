@@ -41,10 +41,13 @@ function makeBackend() {
     { email: 'viewer@gmail.com', role: 'Viewer', addedBy: 'admin@gmail.com', addedDate: '', tourStatus: 'Pending' },
   ];
   const itinerary = [{ id: '1', day: 'Fri', time: '10:00', title: 'Welcome', location: 'Hall', status: 'Upcoming' }];
+  const logistics = [{ id: 'G1', name: 'Verma family', members: '3', contact: '+91 98765 43210', email: 'viewer@gmail.com',
+    arrival: '2027-01-22T14:30:00+05:30', departure: '', mode: 'Train', pickupStatus: 'Pending', dropStatus: 'Pending' }];
+  const familyContact = { name: 'Kaus', phone: '+91 90000 00000' };
   const audit = [];
   const email = (tok) => JSON.parse(Buffer.from(tok.split('.')[1], 'base64url').toString()).email;
   return {
-    audit, members, calls: 0, tourCalls: [],
+    audit, members, itinerary, logistics, calls: 0, tourCalls: [],
     handle(body) {
       this.calls += 1;
       const me = email(body.idToken);
@@ -52,7 +55,8 @@ function makeBackend() {
       if (!m) return { ok: false, code: 'NOT_MEMBER', error: 'This Google account is not on the guest list.' };
       const isAdmin = m.role === 'Admin';
       if (body.action === 'session') {
-        return { ok: true, data: { email: me, name: me, role: m.role, isAdmin, tourStatus: m.tourStatus, itinerary, ...(isAdmin ? { logistics: [], members } : {}) } };
+        const myTravel = logistics.filter((g) => g.email === me);
+        return { ok: true, data: { email: me, name: me, role: m.role, isAdmin, tourStatus: m.tourStatus, itinerary, myTravel, familyContact, ...(isAdmin ? { logistics, members } : {}) } };
       }
       if (body.action === 'completeTour') { // any member may record their own tour outcome
         this.tourCalls.push(`${me}|${body.payload.status}`);
@@ -65,6 +69,24 @@ function makeBackend() {
       if (body.action === 'addMember') members.push({ email: p.email, role: p.role, addedBy: me, addedDate: '', tourStatus: 'Pending' });
       if (body.action === 'updateMemberRole') members.find((x) => x.email === p.email).role = p.role;
       if (body.action === 'removeMember') members.splice(members.findIndex((x) => x.email === p.email), 1);
+      if (body.action === 'addEvent') {
+        itinerary.push({ id: String(itinerary.length + 1), day: p.day, time: p.time, title: p.title, location: p.location, status: 'Upcoming' });
+        return { ok: true, data: { itinerary } };
+      }
+      if (body.action === 'addPickup') {
+        logistics.push({ id: `G${logistics.length + 1}`, name: p.name, members: p.members, contact: p.contact, email: p.email, arrival: '', departure: '', mode: p.mode, pickupStatus: p.pickupStatus, dropStatus: 'Pending' });
+        return { ok: true, data: { logistics } };
+      }
+      if (body.action === 'updateDropoff') {
+        logistics.find((g) => g.id === p.id).dropStatus = p.status;
+        return { ok: true, data: { logistics } };
+      }
+      if (body.action === 'updateLogistics') { // partial update: only keys the client sent
+        const row = logistics.find((g) => g.id === p.id);
+        const changed = Object.keys(p).filter((k) => k !== 'id' && row[k] !== p[k]);
+        changed.forEach((k) => { row[k] = p[k]; });
+        return { ok: true, data: { id: p.id, changed, logistics } };
+      }
       return { ok: true, data: { members } };
     },
   };
@@ -101,7 +123,7 @@ async function signIn(page, email, token = jwt(email, email)) {
   await page.click('#fake-gsi');
 }
 
-/** Dismiss the Ganesh Vandana welcome splash (shown once per browser session). */
+/** Dismiss the Ganesh Vandana welcome splash (shown on every sign-in and app open). */
 async function enter(page) {
   await page.waitForSelector('#welcome-splash [data-welcome="enter"]');
   await page.click('[data-welcome="enter"]');
@@ -161,8 +183,14 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     await page.waitForTimeout(300);
     assert(!(await page.$('#tour-root')), 'tour does not replay after a sync');
 
-    assert(!(await visible(page, '#bottom-nav')), 'viewer has no admin nav');
-    assert((await page.textContent('#account-label')) === 'Viewer', 'role label = Viewer');
+    console.log('Guest sees their own pick-up & drop');
+    assert(await visible(page, '#bottom-nav'), 'guests get a Schedule + My travel nav');
+    assert(!(await visible(page, '[data-tab="pickups"]')) && !(await visible(page, '[data-tab="members"]')), 'no admin tabs for guests');
+    await page.click('[data-tab="travel"]');
+    await page.waitForSelector('#view >> text=Verma family');
+    assert(await page.isVisible('text=Pick-up on arrival') && await page.isVisible('text=Drop on departure'), 'own pick-up and drop shown');
+    assert(await page.isVisible('#view a[href="tel:+919000000000"]'), 'family contact is one tap to call');
+    assert((await page.textContent('#account-label')) === 'Atithi', 'legacy Viewer role shown as Atithi');
     assert(await page.evaluate(() => !localStorage.getItem('evt.credential') && !!sessionStorage.getItem('evt.credential')),
       'ID token kept in sessionStorage only');
     assert(await page.evaluate(() => !/eyJ|idToken/.test(JSON.stringify(localStorage))), 'no token material in localStorage');
@@ -177,7 +205,47 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     await signIn(page, 'admin@gmail.com');
     await enter(page);
     assert(!(await page.$('#tour-root')), 'no tour for a member who already completed it');
+    assert((await page.textContent('#app-title-text')) === 'Test Fest', 'full event name in the header');
+    assert(!(await visible(page, '[data-tab="travel"]')), 'admins use Pick & Drop instead of My travel');
     await page.waitForSelector('[data-tab="members"]:not(.hidden)');
+
+    console.log('Admin creates a ceremony and an arrival from the app');
+    assert((await page.textContent('[data-tab="control"]')).trim() === 'Event Control', 'tab renamed to Event Control');
+    await page.click('[data-tab="control"]');
+    await page.click('[data-action="add-event"]');
+    await page.fill('#modal-root input[name="title"]', 'Haldi');
+    await page.fill('#modal-root input[name="day"]', 'Sat');
+    await page.fill('#modal-root input[name="time"]', '19:05');
+    await page.fill('#modal-root input[name="location"]', 'Lawn');
+    await page.click('#modal-root [data-modal="confirm"]');
+    await page.waitForSelector('#view >> text=Haldi');
+    assert(backend.itinerary.some((e) => e.title === 'Haldi' && e.day === 'Sat' && e.time === '7:05 PM'), 'event created with 12h time');
+    assert(!(await page.$('#modal-root [role="dialog"]')), 'create modal closed');
+
+    await page.click('[data-tab="pickups"]');
+    await page.click('[data-action="add-pickup"]');
+    await page.click('#modal-root [data-modal="confirm"]');
+    assert(await page.isVisible('#modal-root [role="dialog"]'), 'modal stays open when the name is missing');
+    await page.fill('#modal-root input[name="name"]', 'Sharma family');
+    await page.fill('#modal-root input[name="members"]', '4');
+    await page.click('#modal-root [data-modal="confirm"]');
+    await page.waitForSelector('#view >> text=Sharma family');
+    assert(backend.logistics.some((g) => g.name === 'Sharma family' && g.members === '4' && g.pickupStatus === 'Pending'), 'arrival created');
+
+    console.log('Admin edits travel and tracks drops');
+    await page.click('[data-action="edit-pickup"][data-id="G1"]');
+    assert((await page.inputValue('#modal-root input[name="arrival"]')) === '2027-01-22T14:30', 'edit form prefilled with the arrival');
+    await page.fill('#modal-root input[name="mode"]', 'Flight');
+    await page.click('#modal-root [data-modal="confirm"]');
+    await page.waitForSelector('#modal-root [role="dialog"]', { state: 'detached' });
+    const verma = backend.logistics.find((g) => g.id === 'G1');
+    assert(verma.mode === 'Flight' && verma.arrival === '2027-01-22T14:30' && verma.email === 'viewer@gmail.com', 'travel edited, other fields kept');
+    await page.click('[data-action="logistics-mode"][data-value="drop"]');
+    await page.waitForSelector('[data-action="toggle-dropoff"][data-id="G2"]');
+    await page.click('[data-action="toggle-dropoff"][data-id="G2"]');
+    await page.waitForSelector('[data-action="toggle-dropoff"][data-id="G2"][data-next="Pending"]');
+    assert(backend.logistics.find((g) => g.id === 'G2').dropStatus === 'Dropped Off', 'drop marked done');
+
     await page.click('[data-tab="members"]');
     await page.waitForSelector('text=Members & access');
     assert(await page.isVisible('text=tour skipped'), 'admins can see who skipped the tour');
@@ -185,10 +253,10 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     assert(await page.isDisabled('button[data-email="admin@gmail.com"]'), 'own remove disabled');
 
     await page.fill('#new-member-email', 'New.Guest@Gmail.com');
-    await page.selectOption('form[data-action="add-member"] select[name="role"]', 'Viewer');
+    await page.selectOption('form[data-action="add-member"] select[name="role"]', 'Atithi');
     await page.click('form[data-action="add-member"] button[type="submit"]');
     await page.waitForSelector('text=new.guest@gmail.com');
-    assert(backend.members.some((m) => m.email === 'new.guest@gmail.com' && m.role === 'Viewer'), 'member added (lower-cased) as Viewer');
+    assert(backend.members.some((m) => m.email === 'new.guest@gmail.com' && m.role === 'Atithi'), 'member added (lower-cased) as Atithi');
 
     await page.selectOption('select[data-email="new.guest@gmail.com"]', 'Admin');
     await page.waitForFunction(() => document.querySelector('select[data-email="new.guest@gmail.com"]')?.value === 'Admin');
@@ -198,8 +266,14 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     await page.waitForFunction(() => !document.querySelector('button[data-email="viewer@gmail.com"]'));
     assert(!backend.members.some((m) => m.email === 'viewer@gmail.com'), 'member removed');
 
-    assert(backend.audit.length === 3 && backend.audit.every((a) => a.startsWith('admin@gmail.com|') && /\|\d{4}-\d\d-\d\dT/.test(a)),
+    assert(backend.audit.length === 7 && backend.audit.every((a) => a.startsWith('admin@gmail.com|') && /\|\d{4}-\d\d-\d\dT/.test(a)),
       'every admin call carried userEmail + timestamp');
+
+    console.log('Welcome plays again every time the app is opened');
+    await page.reload();
+    await page.waitForSelector('#welcome-splash');
+    assert(true, 'welcome splash on reopen');
+    await enter(page);
 
     console.log('Sign-out during an in-flight sync stays signed out (race regression)');
     backend.delayMs = 800;

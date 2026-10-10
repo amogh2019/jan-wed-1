@@ -4,6 +4,7 @@ const { createBackend, makeToken } = require('./gas-harness');
 
 const ADMIN = 'admin@example.com';
 const VIEWER = 'viewer@example.com';
+// Fixtures keep the legacy role name "Viewer" in the sheet: it must keep working as Atithi.
 const withViewer = () => createBackend({ members: [[ADMIN, 'Admin', 'seed', ''], [VIEWER, 'Viewer', ADMIN, '']] });
 
 test('doGet is a health check and leaks no data', () => {
@@ -55,7 +56,7 @@ test('client-claimed email must match the verified token', () => {
 test('viewer session contains the schedule only', () => {
   const out = withViewer().call(VIEWER, 'session');
   assert.equal(out.ok, true);
-  assert.equal(out.data.role, 'Viewer');
+  assert.equal(out.data.role, 'Atithi', 'legacy Viewer cell is read as Atithi');
   assert.equal(out.data.isAdmin, false);
   assert.equal(out.data.itinerary.length, 2);
   assert.equal(out.data.logistics, undefined);
@@ -71,7 +72,7 @@ test('admin session includes logistics and members', () => {
 
 test('viewers cannot run admin actions and the attempt is audited', () => {
   const b = withViewer();
-  for (const action of ['updateEvent', 'updatePickup', 'addMember', 'updateMemberRole', 'removeMember', 'addAdmin']) {
+  for (const action of ['updateEvent', 'updatePickup', 'addEvent', 'addPickup', 'addMember', 'updateMemberRole', 'removeMember', 'addAdmin']) {
     assert.equal(b.call(VIEWER, action, { eventId: '1', status: 'Live', email: 'x@example.com' }).code, 'FORBIDDEN');
   }
   assert.ok(b.audit().every((r) => r[2] === 'Security' && r[1] === VIEWER));
@@ -114,17 +115,17 @@ test('updatePickup writes and audits', () => {
 
 test('member lifecycle: add, change role, remove — each audited', () => {
   const b = createBackend();
-  assert.equal(b.call(ADMIN, 'addMember', { email: 'New@Example.com', role: 'Viewer' }).ok, true);
+  assert.equal(b.call(ADMIN, 'addMember', { email: 'New@Example.com', role: 'Atithi' }).ok, true);
   assert.equal(b.call(ADMIN, 'addMember', { email: 'new@example.com' }).code, 'CONFLICT');
-  assert.equal(b.call('new@example.com', 'session').data.role, 'Viewer');
+  assert.equal(b.call('new@example.com', 'session').data.role, 'Atithi');
   assert.equal(b.call(ADMIN, 'updateMemberRole', { email: 'new@example.com', role: 'Admin' }).ok, true);
   assert.equal(b.call('new@example.com', 'session').data.isAdmin, true);
   assert.equal(b.call(ADMIN, 'removeMember', { email: 'new@example.com' }).ok, true);
   assert.equal(b.call('new@example.com', 'session').code, 'NOT_MEMBER');
   const details = b.audit().map((r) => r[3]);
   assert.deepEqual(details, [
-    'Added new@example.com to Members as Viewer',
-    'Changed role of new@example.com from Viewer to Admin',
+    'Added new@example.com to Members as Atithi',
+    'Changed role of new@example.com from Atithi to Admin',
     'Removed new@example.com (Admin) from Members',
   ]);
 });
@@ -278,7 +279,7 @@ test('setup: existing data is preserved; missing columns appended; only blank ce
 
   const m = b.sheets.Members.data;
   assert.deepEqual(m[0].slice(4), ['TourStatus', 'TourCompletedAt'], 'new columns appended to the right');
-  assert.equal(m[2][1], 'Viewer', 'blank role defaulted');
+  assert.equal(m[2][1], 'Atithi', 'blank role defaulted');
   assert.equal(m[1][4], 'Pending');
   assert.equal(m.length, 3, 'owner not re-seeded when Members already has people');
   assert.match(summary, /added columns TourStatus, TourCompletedAt/);
@@ -301,4 +302,154 @@ test('setup: legacy Admins tab migrates into an empty Members tab', () => {
   const emails = b.sheets.Members.data.slice(1).map((r) => [r[0], r[1]]);
   assert.deepEqual(emails[0], ['boss@example.com', 'Admin']);
   assert.ok(b.sheets.Admins.data.length === 2, 'legacy tab left intact');
+});
+
+/* ------------------------------------------------------------- Atithi role */
+
+test('roles: legacy "Viewer" input is stored as Atithi; unknown roles are rejected', () => {
+  const b = createBackend();
+  assert.equal(b.call(ADMIN, 'addMember', { email: 'old.client@example.com', role: 'Viewer' }).ok, true);
+  assert.equal(b.sheets.Members.data.at(-1)[1], 'Atithi');
+  assert.equal(b.call(ADMIN, 'addMember', { email: 'x@example.com', role: 'Owner' }).code, 'BAD_REQUEST');
+  assert.equal(b.call(ADMIN, 'addMember', { email: 'y@example.com' }).data.members.find((m) => m.email === 'y@example.com').role, 'Atithi');
+});
+
+test('roles: setup keeps legacy Viewer valid in the dropdown; migrateViewerToAtithi only relabels Role cells', () => {
+  const b = withViewer();
+  b.sandbox.setup();
+  assert.deepEqual([...b.sheets.Members.validations[2].values], ['Admin', 'Atithi', 'Viewer']);
+  assert.equal(b.sheets.Members.data[2][1], 'Viewer', 'setup never rewrites an existing role');
+  const rowsBefore = b.sheets.Members.data.length;
+  assert.equal(b.sandbox.migrateViewerToAtithi(), 1);
+  assert.equal(b.sheets.Members.data[2][1], 'Atithi');
+  assert.equal(b.sheets.Members.data.length, rowsBefore);
+  assert.match(b.audit().at(-1)[3], /Relabelled 1 legacy "Viewer"/);
+  assert.equal(b.sandbox.migrateViewerToAtithi(), 0, 'idempotent');
+});
+
+/* -------------------------------------------------- Create itinerary / pick-ups */
+
+test('addEvent: appends an Upcoming event with the next ID, in the sheet\'s column order, audited', () => {
+  const b = createBackend({ overrides: { Itinerary: [
+    ['Title', 'EventID', 'Day', 'Time', 'Location', 'Status', 'Notes'],
+    ['Haldi', '7', 'Day 1', '9:00 AM', 'Lawn', 'Completed', 'keep me'],
+  ] } });
+  const out = b.call(ADMIN, 'addEvent', { title: 'Sangeet', day: 'Day 2', time: '7:30 PM', location: 'Hall', status: 'Live' });
+  assert.equal(out.ok, true);
+  assert.equal(out.data.eventId, '8');
+  assert.deepEqual(b.sheets.Itinerary.data[2], ['Sangeet', '8', 'Day 2', '7:30 PM', 'Hall', 'Upcoming', '']);
+  assert.equal(b.sheets.Itinerary.data[1][6], 'keep me');
+  assert.equal(out.data.itinerary.at(-1).title, 'Sangeet');
+  assert.equal(b.fetches.filter((f) => f.url.includes('onesignal')).length, 0, 'creating never pushes');
+  assert.deepEqual([...b.audit().at(-1).slice(1, 4)], [ADMIN, 'Event', 'Added Event 8 ("Sangeet") on Day 2 at 7:30 PM @ Hall']);
+});
+
+test('addEvent: validates input and neutralises formulas', () => {
+  const b = createBackend();
+  assert.equal(b.call(ADMIN, 'addEvent', { day: 'Day 1' }).code, 'BAD_REQUEST');
+  assert.equal(b.call(ADMIN, 'addEvent', { title: 'X' }).code, 'BAD_REQUEST');
+  assert.equal(b.call(ADMIN, 'addEvent', { title: 'X'.repeat(201), day: 'Day 1' }).code, 'BAD_REQUEST');
+  assert.equal(b.call(ADMIN, 'addEvent', { title: '=IMPORTXML("x")', day: 'Day 1' }).ok, true);
+  assert.equal(b.sheets.Itinerary.data.at(-1)[3], '\'=IMPORTXML("x")');
+});
+
+test('addPickup: appends with a prefixed ID, parses date-times, audited', () => {
+  const b = createBackend();
+  const out = b.call(ADMIN, 'addPickup', {
+    name: 'Sharma family', members: '4', contact: '+91 98765 43210',
+    arrival: '2027-01-22T14:30', departure: '2027-01-26T09:00', mode: 'Train',
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.data.id, 'G2');
+  const row = b.sheets.Logistics.data.at(-1);
+  assert.equal(row[0], 'G2');
+  assert.equal(row[2], 4);
+  assert.equal(row[3], "'+91 98765 43210", 'leading + kept as text');
+  assert.equal(row[4].toISOString(), '2027-01-22T14:30:00.000Z');
+  assert.equal(row[7], 'Pending');
+  assert.equal(out.data.logistics.at(-1).name, 'Sharma family');
+  assert.deepEqual([...b.audit().at(-1).slice(2, 4)], ['Logistics', 'Added Sharma family (ID G2), 4 guest(s), Train as Pending']);
+});
+
+test('addPickup: rejects bad input', () => {
+  const b = createBackend();
+  const bad = [
+    {},
+    { name: 'A', members: '0' },
+    { name: 'A', members: '2.5' },
+    { name: 'A', contact: 'call me maybe' },
+    { name: 'A', arrival: 'tomorrow' },
+    { name: 'A', arrival: '2027-01-23T10:00', departure: '2027-01-22T10:00' },
+    { name: 'A', pickupStatus: 'Lost' },
+  ];
+  for (const payload of bad) assert.equal(b.call(ADMIN, 'addPickup', payload).code, 'BAD_REQUEST', JSON.stringify(payload));
+  assert.equal(b.sheets.Logistics.data.length, 2, 'nothing appended');
+});
+
+/* ------------------------------------------------------------- Pick & Drop */
+test('updateDropoff: adds DropStatus to a legacy sheet, sets it, audited; viewers are refused', () => {
+  const b = withViewer();
+  assert.equal(b.call(VIEWER, 'updateDropoff', { id: 'G1', status: 'Dropped Off' }).code, 'FORBIDDEN');
+  const out = b.call(ADMIN, 'updateDropoff', { id: 'G1', status: 'Dropped Off' });
+  assert.equal(out.ok, true);
+  const header = b.sheets.Logistics.data[0];
+  assert.deepEqual(header.slice(0, 8), ['ID', 'Name', 'Members', 'Contact', 'ArrivalDateTime', 'DepartureDateTime', 'Mode', 'PickupStatus'], 'existing columns untouched');
+  assert.equal(b.sheets.Logistics.data[1][header.indexOf('DropStatus')], 'Dropped Off');
+  assert.equal(b.sheets.Logistics.data[1][7], 'Pending', 'pick-up status untouched');
+  assert.equal(out.data.logistics[0].dropStatus, 'Dropped Off');
+  assert.match(b.audit().at(-1)[3], /drop-off as Dropped Off/);
+  assert.equal(b.call(ADMIN, 'updateDropoff', { id: 'G1', status: 'Picked Up' }).code, 'BAD_REQUEST');
+  assert.equal(b.call(ADMIN, 'updateDropoff', { id: 'G9', status: 'Pending' }).code, 'NOT_FOUND');
+});
+
+test('updateLogistics: only sent fields change; untouched free-text times survive; audited once', () => {
+  const b = withViewer();
+  const before = b.audit().length;
+  const out = b.call(ADMIN, 'updateLogistics', { id: 'G1', name: 'John Doe', mode: 'Train', email: 'Viewer@Example.com' });
+  assert.equal(out.ok, true);
+  assert.deepEqual([...out.data.changed], ['email', 'mode']);
+  const header = b.sheets.Logistics.data[0];
+  const row = b.sheets.Logistics.data[1];
+  assert.equal(row[6], 'Train');
+  assert.equal(row[header.indexOf('Email')], VIEWER, 'email lower-cased');
+  assert.equal(row[4], '2026-12-01 10:00', 'arrival not sent, so kept');
+  assert.equal(b.audit().length, before + 1);
+  assert.match(b.audit().at(-1)[3], /Updated John Doe \(ID G1\): email, mode/);
+
+  const again = b.call(ADMIN, 'updateLogistics', { id: 'G1', name: 'John Doe', mode: 'Train' });
+  assert.deepEqual([...again.data.changed], [], 'no-op edit');
+  assert.equal(b.audit().length, before + 1, 'no-op edits are not audited');
+});
+
+test('updateLogistics: validates and is admin-only', () => {
+  const b = withViewer();
+  assert.equal(b.call(VIEWER, 'updateLogistics', { id: 'G1', name: 'X' }).code, 'FORBIDDEN');
+  assert.equal(b.call(ADMIN, 'updateLogistics', { id: 'G1' }).code, 'BAD_REQUEST', 'name required');
+  assert.equal(b.call(ADMIN, 'updateLogistics', { id: 'G1', name: 'X', email: 'nope' }).code, 'BAD_REQUEST');
+  assert.equal(b.call(ADMIN, 'updateLogistics', { id: 'G1', name: 'X', arrival: '2027-01-23T10:00', departure: '2027-01-22T10:00' }).code, 'BAD_REQUEST');
+  assert.equal(b.call(ADMIN, 'updateLogistics', { id: 'G9', name: 'X' }).code, 'NOT_FOUND');
+});
+
+test('session: guests get only their own travel rows plus the family contact', () => {
+  const b = createBackend({
+    members: [[ADMIN, 'Admin', 'seed', ''], [VIEWER, 'Atithi', ADMIN, '']],
+    props: { FAMILY_CONTACT_NAME: 'Kaus', FAMILY_CONTACT_PHONE: '+91 90000 00000' },
+  });
+  b.call(ADMIN, 'addPickup', { name: 'Verma family', email: VIEWER, mode: 'Car' });
+  const out = b.call(VIEWER, 'session');
+  assert.equal(out.ok, true);
+  assert.equal(out.data.logistics, undefined, 'no full list for guests');
+  assert.equal(out.data.myTravel.length, 1);
+  assert.equal(out.data.myTravel[0].name, 'Verma family');
+  assert.equal(out.data.myTravel[0].email, undefined, 'own row is trimmed');
+  assert.deepEqual({ ...out.data.familyContact }, { name: 'Kaus', phone: '+91 90000 00000' });
+  assert.equal(b.call(ADMIN, 'session').data.myTravel.length, 0);
+});
+
+test('session: a guest still signs in when the Logistics tab is missing', () => {
+  const b = createBackend({ members: [[ADMIN, 'Admin', 'seed', ''], [VIEWER, 'Atithi', ADMIN, '']], overrides: { Logistics: null } });
+  const out = b.call(VIEWER, 'session');
+  assert.equal(out.ok, true);
+  assert.deepEqual([...out.data.myTravel], []);
+  assert.equal(out.data.familyContact, null);
 });

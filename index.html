@@ -7,7 +7,7 @@
        frame-ancestors is ignored in <meta>; app.js frame-busts instead. -->
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'self';
-    script-src 'self' https://accounts.google.com/gsi/client https://cdn.onesignal.com https://onesignal.com;
+    script-src 'self' https://accounts.google.com/gsi/client https://cdn.onesignal.com https://onesignal.com https://api.onesignal.com;
     style-src 'self' https://accounts.google.com/gsi/style https://onesignal.com https://cdn.onesignal.com;
     img-src 'self' data: https://lh3.googleusercontent.com https://lh4.googleusercontent.com https://lh5.googleusercontent.com https://lh6.googleusercontent.com https://onesignal.com https://img.onesignal.com;
     font-src 'self' https://onesignal.com;
@@ -19,7 +19,7 @@
     base-uri 'self';
     form-action 'self'" />
   <meta name="referrer" content="strict-origin-when-cross-origin" />
-  <title>Event Companion</title>
+  <title>Kaus-Anch : Our 3-Day Celebration</title>
   <meta name="description" content="Live schedule, notifications and pick-up coordination for our 3-day celebration." />
   <meta name="theme-color" content="#641224" />
   <link rel="preload" href="fonts/poppins-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin />
@@ -32,7 +32,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="apple-mobile-web-app-title" content="Event" />
+  <meta name="apple-mobile-web-app-title" content="Kaus-Anch : Our 3-Day Celebration" />
 
   <!-- Precompiled Tailwind (npm run build:css). No CDN script, so the CSP needs no 'unsafe-eval'/'unsafe-inline' scripts. -->
   <link rel="stylesheet" href="styles.css" />
@@ -50,13 +50,15 @@
   <!-- Header -->
   <header class="safe-top sticky top-0 z-30 text-white">
     <div class="header-silk shadow-lg">
-      <div class="max-w-2xl mx-auto px-4 pt-3 pb-2.5 flex items-center gap-3">
+      <div class="max-w-2xl mx-auto px-4 pt-3.5 pb-2.5 flex items-center gap-3">
         <!-- 80px source shown at 40px for sharp 2x displays. -->
         <!--suppress CheckImageSize -->
         <img src="icons/icon-80.png" alt="" width="40" height="40" class="w-10 h-10 rounded-xl ring-2 ring-haldi-300/60 shadow" />
         <div class="flex-1 min-w-0">
-          <p id="app-blessing" class="hidden font-display text-[11px] leading-none text-haldi-200/90 truncate"></p>
-          <h1 id="app-title" class="font-display text-[1.35rem] leading-tight truncate text-foil">Event Companion</h1>
+          <!-- Devanagari vowel marks rise above the line: keep a normal line-height so truncate never clips them. -->
+          <p id="app-blessing" lang="sa" class="hidden font-display text-xs leading-normal pt-0.5 text-haldi-200/90 truncate"></p>
+          <!-- Long names glide across instead of being cut off (see .marquee in src/styles.css). -->
+          <h1 id="app-title" class="marquee font-display text-[1.35rem] leading-tight"><span id="app-title-text" class="marquee-text text-foil">Kaus-Anch : Our 3-Day Celebration</span></h1>
           <p id="sync-indicator" class="text-[11px] text-kumkum-100/90 truncate" aria-live="polite">Loading…</p>
         </div>
         <button id="refresh-btn" type="button" aria-label="Refresh" title="Refresh" class="hidden w-10 h-10 grid place-items-center rounded-full hover:bg-white/10 active:bg-white/20">
@@ -103,7 +105,7 @@
     </div>
   </main>
 
-  <!-- Bottom navigation (admins) -->
+  <!-- Bottom navigation (admins: 4 tabs; guests: Schedule + My travel) -->
   <nav id="bottom-nav" aria-label="Sections" class="hidden safe-bottom fixed bottom-0 inset-x-0 z-30 bg-ivory-50/95 backdrop-blur border-t border-haldi-200 shadow-[0_-6px_20px_-12px_rgb(74_13_26/.25)]">
     <div class="max-w-2xl mx-auto grid grid-cols-1" id="nav-grid">
       <button type="button" data-tab="schedule" class="nav-btn flex flex-col items-center gap-0.5 pt-2 pb-1.5 text-[11px] font-semibold">
@@ -114,12 +116,17 @@
       <button type="button" data-tab="control" class="nav-btn admin-only hidden flex-col items-center gap-0.5 pt-2 pb-1.5 text-[11px] font-semibold">
         <span class="nav-pill grid place-items-center w-14 h-8 rounded-full transition">
           <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3c2.5 3 3 5.5 0 8-3-2.5-2.5-5 0-8zM4 14h16l-1.5 4.5a2 2 0 01-1.9 1.5H7.4a2 2 0 01-1.9-1.5L4 14z"/></svg>
-        </span>Control
+        </span><span class="leading-tight text-center">Event Control</span>
       </button>
       <button type="button" data-tab="pickups" class="nav-btn admin-only hidden flex-col items-center gap-0.5 pt-2 pb-1.5 text-[11px] font-semibold">
         <span class="nav-pill grid place-items-center w-14 h-8 rounded-full transition">
           <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16V8a2 2 0 012-2h9l4 4h1a2 2 0 012 2v4h-2M3 16h2m4 0h6"/><circle cx="7" cy="16.5" r="2"/><circle cx="17" cy="16.5" r="2"/></svg>
-        </span>Pick-ups
+        </span>Pick &amp; Drop
+      </button>
+      <button type="button" data-tab="travel" class="nav-btn guest-only flex flex-col items-center gap-0.5 pt-2 pb-1.5 text-[11px] font-semibold">
+        <span class="nav-pill grid place-items-center w-14 h-8 rounded-full transition">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="7" width="14" height="12" rx="2"/><path stroke-linecap="round" d="M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M9 11v4M15 11v4"/></svg>
+        </span>My travel
       </button>
       <button type="button" data-tab="members" class="nav-btn admin-only hidden flex-col items-center gap-0.5 pt-2 pb-1.5 text-[11px] font-semibold">
         <span class="nav-pill grid place-items-center w-14 h-8 rounded-full transition">

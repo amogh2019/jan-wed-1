@@ -1,6 +1,6 @@
 {
-  "name": "Event Companion",
-  "short_name": "Event",
+  "name": "Kaus-Anch : Our 3-Day Celebration",
+  "short_name": "Kaus-Anch : Our 3-Day Celebration",
   "description": "Live schedule, announcements and pick-up coordination for our 3-day event.",
   "id": "./",
   "start_url": "./?source=pwa",

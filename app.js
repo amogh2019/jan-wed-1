@@ -14,10 +14,14 @@
 
   const CONFIG = window.APP_CONFIG || {};
   const BASE_PATH = location.pathname.slice(0, location.pathname.lastIndexOf('/') + 1); // e.g. "/jan-wed-1/"
+  const PUSH_INIT_TIMEOUT_MS = 15000;
   // The ID token is a bearer credential: keep it in sessionStorage (tab-scoped, gone on close).
   // GIS auto-select silently re-issues one on the next launch.
   const STORAGE = { CREDENTIAL: 'evt.credential', LAST_USER: 'evt.lastUser', DATA_CACHE: 'evt.data', INSTALL_DISMISSED: 'evt.installDismissed' };
-  const ROLES = ['Admin', 'Viewer'];
+  // "Atithi" (honoured guest) is the read-only role; "Viewer" is its pre-v1.4 name.
+  const GUEST_ROLE = 'Atithi';
+  const ROLES = ['Admin', GUEST_ROLE];
+  const normalizeRole = (role) => (String(role || '').trim().toLowerCase() === 'admin' ? 'Admin' : GUEST_ROLE);
   const EMAIL_RE = /^[a-z0-9._%+-]{1,64}@[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,24}$/;
   const BACKEND_RE = /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/;
   const isPlaceholder = (v) => !v || /REPLACE_WITH/i.test(String(v));
@@ -90,6 +94,8 @@
       /** @type {Guest[]} */
       logistics: [],
       members: [],
+      myTravel: [],        // the signed-in guest's own pick-up / drop rows
+      familyContact: null, // { name, phone } from Script Properties, if set
       user: null,          // { email, name, picture, idToken, exp }
       // 'checking' | 'signed-out' | 'denied' | 'authed' | 'offline' (cached read-only)
       authStatus: 'checking',
@@ -103,6 +109,7 @@
       lastSynced: null,
       online: navigator.onLine,
       pickupFilter: 'all',
+      logisticsMode: 'pickup', // 'pickup' (arrivals) | 'drop' (departures)
       pickupSearch: '',
       memberSearch: '',
       tourStatus: 'Completed', // real value arrives with the session; never tour before that
@@ -170,7 +177,7 @@
         if (err.code === 'NOT_MEMBER') Auth.deny(user.email);
         // Role was downgraded server-side since the last sync: drop admin data now, then resync.
         if (err.code === 'FORBIDDEN' && /not authorized/i.test(err.message)) {
-          Store.set({ isAdmin: false, role: 'Viewer', tab: 'schedule', logistics: [], members: [] });
+          Store.set({ isAdmin: false, role: GUEST_ROLE, tab: 'schedule', logistics: [], members: [] });
           void Auth.loadSession();
         }
         throw err;
@@ -190,7 +197,7 @@
       const saved = sessionStore.get(STORAGE.CREDENTIAL);
       if (saved?.idToken && !this.isExpired(saved)) {
         Store.set({ user: saved, authStatus: 'checking' });
-        void this.loadSession();
+        void this.loadSession(true); // reopening the app greets the guest again
       } else if (!navigator.onLine && this.restoreOffline()) {
         // Previously verified member, offline: show the cached schedule read-only.
       } else {
@@ -229,7 +236,7 @@
       if (!last?.email || !Array.isArray(cache?.itinerary) || cache.email !== last.email) return false;
       Store.set({
         user: { email: last.email, name: last.name || last.email, picture: safePicture(last.picture) },
-        authStatus: 'offline', role: cache.role || 'Viewer', isAdmin: false, logistics: [], members: [],
+        authStatus: 'offline', role: normalizeRole(cache.role), isAdmin: false, logistics: [], members: [],
         itinerary: cache.itinerary, lastSynced: cache.savedAt,
       });
       return true;
@@ -296,15 +303,17 @@
         picture: safePicture(data.picture) || Store.state.user.picture,
       };
       // Persist only what offline mode needs: the schedule and a token-free identity.
-      storage.set(STORAGE.DATA_CACHE, { email: user.email, role: isAdmin ? 'Admin' : 'Viewer', itinerary: data.itinerary, savedAt });
+      storage.set(STORAGE.DATA_CACHE, { email: user.email, role: isAdmin ? 'Admin' : GUEST_ROLE, itinerary: data.itinerary, savedAt });
       storage.set(STORAGE.LAST_USER, { email: user.email, name: user.name, picture: user.picture });
       Store.set({
         authStatus: 'authed',
-        role: isAdmin ? 'Admin' : 'Viewer',
+        role: isAdmin ? 'Admin' : GUEST_ROLE,
         isAdmin,
         itinerary: Array.isArray(data.itinerary) ? data.itinerary : [],
         logistics: isAdmin && Array.isArray(data.logistics) ? data.logistics : [],
         members: isAdmin && Array.isArray(data.members) ? data.members : [],
+        myTravel: Array.isArray(data.myTravel) ? data.myTravel : [],
+        familyContact: data.familyContact && typeof data.familyContact === 'object' ? data.familyContact : null,
         lastSynced: savedAt,
         error: null,
         tourStatus: ['Pending', 'Completed', 'Skipped'].includes(data.tourStatus) ? data.tourStatus : 'Completed',
@@ -332,7 +341,7 @@
       storage.remove(STORAGE.CREDENTIAL);
       storage.remove(STORAGE.LAST_USER);
       storage.remove(STORAGE.DATA_CACHE);
-      Store.set({ user: null, role: null, isAdmin: false, loading: false, itinerary: [], logistics: [], members: [], tab: 'schedule', lastSynced: null, ...patch });
+      Store.set({ user: null, role: null, isAdmin: false, loading: false, itinerary: [], logistics: [], members: [], myTravel: [], familyContact: null, tab: 'schedule', lastSynced: null, ...patch });
     },
 
     deny(email) {
@@ -345,7 +354,7 @@
       this.epoch += 1;
       sessionStore.remove(STORAGE.CREDENTIAL);
       // Admin-only data must not linger on screen after the session ends.
-      Store.set({ authStatus: 'signed-out', user: null, isAdmin: false, role: null, logistics: [], members: [], loading: false, tab: 'schedule' });
+      Store.set({ authStatus: 'signed-out', user: null, isAdmin: false, role: null, logistics: [], members: [], myTravel: [], loading: false, tab: 'schedule' });
       Modal.close();
       Tour.cancel();
       this.prompt();
@@ -372,10 +381,13 @@
   /* ----------------------------------------------------------------- Push */
   const Push = {
     sdk: null,
+    failed: false,
     supported: 'Notification' in window && 'serviceWorker' in navigator && 'PushManager' in window,
 
     init() {
       if (isPlaceholder(CONFIG.ONESIGNAL_APP_ID)) { this.render(); return; }
+      // If the SDK is blocked (ad-blocker, CSP, network) init never settles; surface that instead of "Loading…" forever.
+      setTimeout(() => { if (!this.sdk) { this.failed = true; this.render(); } }, PUSH_INIT_TIMEOUT_MS);
       window.OneSignalDeferred ??= [];
       window.OneSignalDeferred.push(async (OneSignal) => {
         try {
@@ -391,6 +403,7 @@
           OneSignal.User.PushSubscription.addEventListener('change', () => this.render());
         } catch (err) {
           console.warn('OneSignal init failed', err);
+          this.failed = true;
         }
         this.render();
       });
@@ -402,7 +415,7 @@
       if (isIos() && !isStandalone()) return 'ios-install';
       if (!this.supported) return 'unsupported';
       if (Notification.permission === 'denied') return 'denied';
-      if (!this.sdk) return 'loading';
+      if (!this.sdk) return this.failed ? 'failed' : 'loading';
       if (this.sdk.Notifications.permission && this.sdk.User.PushSubscription.optedIn) return 'subscribed';
       return 'prompt';
     },
@@ -418,6 +431,7 @@
         unsupported: ['This browser does not support push notifications.', null],
         denied: ['Notifications are blocked. Enable them in your browser/site settings.', null],
         loading: ['Let us call you the moment a ceremony begins.', 'Loading…'],
+        failed: ['Notifications couldn’t start — an ad-blocker or a weak connection may be stopping them.', 'Retry'],
         prompt: ['Let us call you the moment a ceremony begins 🪔', 'Notify me'],
       };
       if (!authed || status === 'subscribed' || status === 'unconfigured') { banner.classList.add('hidden'); return; }
@@ -431,7 +445,10 @@
     },
 
     async request() {
-      if (!this.sdk) return;
+      if (!this.sdk) {
+        if (this.failed) location.reload(); // the OneSignal SDK can only be initialised once per page
+        return;
+      }
       const btn = $('#notify-btn');
       btn.disabled = true;
       btn.innerHTML = '<span class="spinner"></span>';
@@ -474,36 +491,107 @@
   };
 
   /* -------------------------------------------------------------- Install */
+  // In-app browsers (WhatsApp, Instagram, Facebook…) cannot install PWAs; guests must open the link in Chrome/Safari.
+  const isInAppBrowser = () => /FBAN|FBAV|FB_IAB|Instagram|WhatsApp|Line\/|; wv\)/i.test(navigator.userAgent);
+  const isAndroid = () => /Android/i.test(navigator.userAgent);
+
   const Install = {
     deferred: null,
+    /** Shareable link that opens the install guide (e.g. sent on WhatsApp). */
+    link() { return `${location.origin}${BASE_PATH}?install=1`; },
+
+    showBanner() {
+      const banner = $('#banner-install');
+      banner.classList.remove('hidden');
+      banner.classList.add('flex');
+    },
+
     init() {
       const banner = $('#banner-install');
-      if (isStandalone() || storage.get(STORAGE.INSTALL_DISMISSED)) return;
-
       window.addEventListener('beforeinstallprompt', (e) => {
         e.preventDefault();
         this.deferred = e;
         $('#install-btn').classList.remove('hidden');
-        banner.classList.remove('hidden');
-        banner.classList.add('flex');
+        if (!storage.get(STORAGE.INSTALL_DISMISSED)) this.showBanner();
       });
-      if (isIos()) {
-        $('#install-text').textContent = 'Install: tap Share ⎋ then "Add to Home Screen".';
-        banner.classList.remove('hidden');
-        banner.classList.add('flex');
-      }
-      window.addEventListener('appinstalled', () => banner.classList.add('hidden'));
+      window.addEventListener('appinstalled', () => { this.deferred = null; banner.classList.add('hidden'); });
 
-      $('#install-btn').addEventListener('click', async () => {
-        if (!this.deferred) return;
-        this.deferred.prompt();
-        await this.deferred.userChoice.catch(() => null);
-        this.deferred = null;
-        banner.classList.add('hidden');
-      });
+      $('#install-btn').addEventListener('click', () => { void this.start(); });
       $('#install-dismiss').addEventListener('click', () => {
         storage.set(STORAGE.INSTALL_DISMISSED, true);
         banner.classList.add('hidden');
+      });
+
+      const params = new URLSearchParams(location.search);
+      const fromLink = params.has('install');
+      if (fromLink) {
+        params.delete('install');
+        const qs = params.toString();
+        history.replaceState(null, '', `${location.pathname}${qs ? `?${qs}` : ''}${location.hash}`);
+      }
+      if (isStandalone()) return;
+      if (isIos()) {
+        $('#install-text').textContent = 'Install: tap Share ⎋ then “Add to Home Screen”.';
+        $('#install-btn').classList.remove('hidden');
+        if (!storage.get(STORAGE.INSTALL_DISMISSED)) this.showBanner();
+      }
+      // Opened from the shared install link: always offer it, even if the banner was dismissed before.
+      if (fromLink) {
+        $('#install-btn').classList.remove('hidden');
+        this.showBanner();
+        setTimeout(() => { if (!Welcome.open) this.guide(); }, 600);
+      }
+    },
+
+    /** Native prompt where the browser allows it; otherwise step-by-step instructions. */
+    async start() {
+      if (!this.deferred) { this.guide(); return; }
+      const prompt = this.deferred;
+      this.deferred = null;
+      prompt.prompt();
+      const choice = await prompt.userChoice.catch(() => null);
+      if (choice?.outcome === 'accepted') $('#banner-install').classList.add('hidden');
+    },
+
+    guide() {
+      if (isStandalone()) { Toast.show('The app is already installed on this device. 🌼', 'success'); return; }
+      const step = (n, html) => `<li class="flex gap-3"><span class="w-7 h-7 shrink-0 rounded-full bg-haldi-100 text-kumkum-800 grid place-items-center text-xs font-bold">${n}</span><span class="pt-1">${html}</span></li>`;
+      let steps;
+      if (isInAppBrowser()) {
+        steps = [
+          `Tap the <b>⋮</b> or <b>…</b> menu at the top of this screen.`,
+          `Choose <b>${isIos() ? 'Open in Safari' : 'Open in Chrome'}</b> (or “Open in browser”).`,
+          'Then open this guide again from the 📲 banner.',
+        ];
+      } else if (isIos()) {
+        steps = [
+          'Make sure this page is open in <b>Safari</b>.',
+          'Tap the <b>Share</b> button <span aria-hidden="true">⎋</span> at the bottom of the screen.',
+          'Scroll down and tap <b>Add to Home Screen</b>, then <b>Add</b>.',
+        ];
+      } else if (isAndroid()) {
+        steps = [
+          'Open this page in <b>Chrome</b>.',
+          'Tap the <b>⋮</b> menu at the top-right.',
+          'Tap <b>Install app</b> (or <b>Add to Home screen</b>), then <b>Install</b>.',
+        ];
+      } else {
+        steps = [
+          'Open this page in <b>Chrome</b> or <b>Edge</b>.',
+          'Click the <b>install</b> icon <span aria-hidden="true">⊕</span> at the right of the address bar.',
+          'Click <b>Install</b>.',
+        ];
+      }
+      Modal.open(`
+        <div class="text-center">
+          <div class="text-3xl" aria-hidden="true">📲</div>
+          <h3 class="font-display text-2xl text-kumkum-800 mt-1">Add the app to your phone</h3>
+          <p class="text-sm text-ink-500 mt-1">One tap from your home screen — schedule, live alerts and your pick-up.</p>
+        </div>
+        ${isInAppBrowser() ? '<p class="mt-3 rounded-xl bg-marigold-100 text-marigold-900 px-3 py-2 text-xs">This link opened inside another app, which can’t install apps. Please open it in your browser first.</p>' : ''}
+        <ol class="mt-4 space-y-3 text-sm text-ink-700">${steps.map((t, i) => step(i + 1, t)).join('')}</ol>
+        <button type="button" class="btn-primary w-full mt-5" data-modal="close">Got it</button>`, {
+        onMount: (root) => root.querySelector('[data-modal="close"]').addEventListener('click', () => Modal.close()),
       });
     },
   };
@@ -604,18 +692,14 @@
     : '');
 
   /* -------------------------------------------------------------- Welcome */
-  // Auspicious opening: Ganesh Vandana, then a personal welcome. Once per browser session.
+  // Auspicious opening: Ganesh Vandana, then a personal welcome. Plays on every sign-in and every
+  // time the app is opened — independent of the one-time tour (which may follow it).
   const Welcome = {
-    KEY: 'evt.welcomed',
     open: false,
 
-    shouldShow(email) { return sessionStore.get(this.KEY) !== email; },
-
     show(user, { isAdmin = false, onClose } = {}) {
-      if (this.open) return;
-      if (!this.shouldShow(user.email)) { onClose?.(); return; }
+      if (this.open || !user) return;
       this.open = true;
-      sessionStore.set(this.KEY, user.email);
 
       const eventName = escapeHtml(CONFIG.EVENT_NAME || 'our celebration');
       const hosts = CONFIG.EVENT_HOSTS ? `<p class="mt-3 text-xs text-haldi-200/90">With love &amp; blessings — ${escapeHtml(CONFIG.EVENT_HOSTS)}</p>` : '';
@@ -636,7 +720,7 @@
             वक्रतुण्ड महाकाय सूर्यकोटि समप्रभ ।<br />निर्विघ्नं कुरु मे देव सर्वकार्येषु सर्वदा ॥
           </p>
           <p class="welcome-line delay-2 mt-2 text-[11px] italic text-ivory-100/70">
-            O Lord Ganesha, radiant as a million suns — remove every obstacle from all our endeavours, always.
+            O Lord Ganesha, who has a curved trunk and a massive body, and whose brilliance is equal to millions of suns — please make all our endeavors free of obstacles, and bless our work always.
           </p>
           <div class="welcome-line delay-3 paisley-divider my-5" aria-hidden="true"></div>
           <h2 id="welcome-title" class="welcome-line delay-3 font-display text-3xl text-ivory-50">स्वागतम्, ${escapeHtml(firstNameOf(user))} ji 🙏</h2>
@@ -699,12 +783,13 @@
         { target: '#banner-notify:not(.hidden)', title: 'Never miss a ceremony', body: 'Turn on notifications and we’ll gently call you the moment an event begins.' },
         { target: '#refresh-btn', title: 'Always up to date', body: 'The schedule refreshes by itself. Tap here any time for the very latest.' },
         { target: '#account-btn', title: 'Your profile', body: 'See your details, replay this tour, or sign out.' },
-        { target: '[data-tab="control"]', admin: true, title: 'Go Live', body: 'Mark a ceremony Live — guests get a push notification and you can share it on WhatsApp.' },
-        { target: '[data-tab="pickups"]', admin: true, title: 'Pick-ups', body: 'Track every arriving family and mark them picked up.' },
+        { target: '[data-tab="control"]', admin: true, title: 'Event Control', body: 'Add ceremonies and mark one Live — guests get a push notification and you can share it on WhatsApp.' },
+        { target: '[data-tab="travel"]', guest: true, title: 'My travel', body: 'Your pick-up and drop, and whom to call if your plans change.' },
+        { target: '[data-tab="pickups"]', admin: true, title: 'Pick & Drop', body: 'Track every family’s arrival pick-up and departure drop, and edit their plans.' },
         { target: '[data-tab="members"]', admin: true, title: 'Guests & access', body: 'Invite guests, make co-hosts admins, and remove access.' },
         { title: 'You’re all set 🪔', body: 'We are so happy you are here. Enjoy every moment!' },
       ];
-      return all.filter((st) => (!st.admin || s.isAdmin) && (!st.target || this.visible(st.target)));
+      return all.filter((st) => (!st.admin || s.isAdmin) && (!st.guest || !s.isAdmin) && (!st.target || this.visible(st.target)));
     },
 
     visible(sel) {
@@ -842,6 +927,7 @@
     Completed: 'bg-ivory-200 text-ink-500 ring-ivory-300',
     Pending: 'bg-marigold-100 text-marigold-800 ring-marigold-300',
     'Picked Up': 'bg-mehndi-100 text-mehndi-800 ring-mehndi-300',
+    'Dropped Off': 'bg-mehndi-100 text-mehndi-800 ring-mehndi-300',
   };
   const STATUS_LABEL = { Live: 'Live now', Completed: '✓ Completed' };
 
@@ -1043,16 +1129,23 @@
               <p class="relative text-sm text-ink-600">This celebration app is private to invited guests. Please sign in with the Google account you shared with the hosts.</p>`}
             <div id="gsi-gate" class="relative mt-6 min-h-[44px] flex justify-center"></div>
             ${!s.online ? '<p class="relative mt-4 text-xs text-marigold-800">You’re offline — please connect to the internet to sign in.</p>' : ''}
-            <p class="relative mt-6 text-[11px] text-ink-400">We only use your Google name, email and photo to confirm your invitation.</p>
+            <p class="relative mt-6 text-[11px] text-ink-400">We only use your Google name and email photo to confirm access on this app.</p>
           </article>
         </div>`;
     },
   };
 
+  const addButton = (action, label) => `
+    <button data-action="${action}" class="btn btn-primary w-full mb-4">＋ ${label}</button>`;
+
   Views.control = (s) => {
-    if (!s.itinerary.length) return emptyState('🎛️', 'No events to control', 'Add rows to the "Itinerary" sheet to get started.');
+    const header = pageHeader('Host console', 'Event Control', '<b>Set Live &amp; Broadcast</b> updates the sheet, notifies every subscribed guest and opens WhatsApp with a ready-to-send message.');
+    if (!s.itinerary.length) {
+      return `${header}${addButton('add-event', 'Add a ceremony')}${emptyState('🎛️', 'No ceremonies yet', 'Add the first ceremony of the celebration above.')}`;
+    }
     return `
-      ${pageHeader('Host console', 'Go Live', '<b>Set Live &amp; Broadcast</b> updates the sheet, notifies every subscribed guest and opens WhatsApp with a ready-to-send message.')}
+      ${header}
+      ${addButton('add-event', 'Add a ceremony')}
       <div class="space-y-3">
         ${s.itinerary.map((e) => {
           const key = `event:${e.id}`;
@@ -1081,67 +1174,134 @@
       </div>`;
   };
 
+  /** Pick-up (arrival) and drop (departure) are the same rows seen through two lenses. */
+  const TRAVEL_MODES = {
+    pickup: { statusKey: 'pickupStatus', done: 'Picked Up', timeKey: 'arrival', action: 'toggle-pickup', keyPrefix: 'pickup', doneLabel: '✓ Mark as Picked Up', welcomed: 'families welcomed', icon: '🚐' },
+    drop: { statusKey: 'dropStatus', done: 'Dropped Off', timeKey: 'departure', action: 'toggle-dropoff', keyPrefix: 'drop', doneLabel: '✓ Mark as Dropped Off', welcomed: 'families seen off', icon: '🧳' },
+  };
+
+  /** Soonest first; rows without a time go last. */
+  const byTime = (key) => (a, b) => {
+    const ta = Date.parse(a[key]) || Infinity;
+    const tb = Date.parse(b[key]) || Infinity;
+    return ta - tb;
+  };
+
+  const telHref = (contact) => escapeHtml(String(contact).replaceAll(/[^\d+]/g, ''));
+
   Views.pickups = (s) => {
+    const mode = TRAVEL_MODES[s.logisticsMode] || TRAVEL_MODES.pickup;
     const q = s.pickupSearch.trim().toLowerCase();
     const list = s.logistics.filter((g) => {
-      if (s.pickupFilter !== 'all' && g.pickupStatus !== s.pickupFilter) return false;
+      if (s.pickupFilter !== 'all' && g[mode.statusKey] !== s.pickupFilter) return false;
       if (!q) return true;
-      return [g.name, g.contact, g.mode, g.id].some((v) => String(v).toLowerCase().includes(q));
-    });
-    const done = s.logistics.filter((g) => g.pickupStatus === 'Picked Up').length;
+      return [g.name, g.contact, g.mode, g.id, g.email].some((v) => String(v || '').toLowerCase().includes(q));
+    }).sort(byTime(mode.timeKey));
+    const done = s.logistics.filter((g) => g[mode.statusKey] === mode.done).length;
     const total = s.logistics.length;
     const pct = total ? Math.round((done / total) * 100) : 0;
     const chip = (value, label) => `<button data-action="pickup-filter" data-value="${value}" aria-pressed="${s.pickupFilter === value}"
         class="${s.pickupFilter === value ? 'chip-on' : 'chip-off'} shrink-0">${label}</button>`;
+    const modeTab = (value, label) => `<button data-action="logistics-mode" data-value="${value}" role="tab" aria-selected="${s.logisticsMode === value}"
+        class="${s.logisticsMode === value ? 'chip-on' : 'chip-off'} flex-1 justify-center min-h-[44px] text-sm">${label}</button>`;
 
     const empty = total
-      ? emptyState('🚐', 'No matching guests', 'Try a different search or filter.')
-      : emptyState('🚐', 'No arrivals yet', 'Add rows to the "Logistics" sheet.');
+      ? emptyState(mode.icon, 'No matching guests', 'Try a different search or filter.')
+      : emptyState(mode.icon, 'No travel plans yet', 'Add the first arriving family above.');
     const guestCount = (g) => (g.members ? `<span class="text-xs font-normal text-ink-500">· ${escapeHtml(g.members)} guests</span>` : '');
-    const contactLink = (g) => {
-      if (!g.contact) return '';
-      const tel = escapeHtml(String(g.contact).replaceAll(/[^\d+]/g, ''));
-      return `<a href="tel:${tel}" class="text-sm font-medium text-kumkum-600">📞 ${escapeHtml(g.contact)}</a>`;
-    };
+    const contactLink = (g) => (g.contact
+      ? `<a href="tel:${telHref(g.contact)}" class="text-sm font-medium text-kumkum-600">📞 ${escapeHtml(g.contact)}</a>`
+      : '');
 
     const listHtml = `
       <div class="space-y-3">
         ${list.map((g) => {
-          const picked = g.pickupStatus === 'Picked Up';
-          const key = `pickup:${g.id}`;
+          const finished = g[mode.statusKey] === mode.done;
+          const key = `${mode.keyPrefix}:${g.id}`;
           return `
-          <article class="card p-4 ${picked ? 'ring-1 ring-mehndi-300' : ''}">
+          <article class="card p-4 ${finished ? 'ring-1 ring-mehndi-300' : ''}">
             <div class="flex items-start justify-between gap-2">
               <div class="min-w-0">
                 <h4 class="font-semibold text-ink-900 truncate">${escapeHtml(g.name)} ${guestCount(g)}</h4>
                 ${contactLink(g)}
+                ${g.email ? `<p class="text-[11px] text-ink-400 truncate">Linked to ${escapeHtml(g.email)}</p>` : ''}
               </div>
-              ${badge(g.pickupStatus)}
+              ${badge(g[mode.statusKey])}
             </div>
             <dl class="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-ink-600">
-              <div><dt class="text-ink-400">Arrival</dt><dd>${escapeHtml(formatDateTime(g.arrival))}</dd></div>
-              <div><dt class="text-ink-400">Departure</dt><dd>${escapeHtml(formatDateTime(g.departure))}</dd></div>
+              <div><dt class="text-ink-400">Arrival</dt><dd class="${mode.timeKey === 'arrival' ? 'font-semibold text-ink-800' : ''}">${escapeHtml(formatDateTime(g.arrival))}</dd></div>
+              <div><dt class="text-ink-400">Departure</dt><dd class="${mode.timeKey === 'departure' ? 'font-semibold text-ink-800' : ''}">${escapeHtml(formatDateTime(g.departure))}</dd></div>
               <div class="col-span-2"><dt class="text-ink-400 inline">Mode:</dt> <dd class="inline">${escapeHtml(g.mode || '—')}</dd></div>
             </dl>
-            <button data-action="toggle-pickup" data-id="${escapeHtml(g.id)}" data-next="${picked ? 'Pending' : 'Picked Up'}" ${Store.isPending(key) ? 'disabled' : ''}
-              class="btn ${picked ? 'btn-ghost' : 'btn-primary'} w-full mt-3">
-              ${spinnerOr(key, picked ? '↩︎ Mark as Pending' : '✓ Mark as Picked Up')}
-            </button>
+            <div class="grid grid-cols-[auto_1fr] gap-2 mt-3">
+              <button data-action="edit-pickup" data-id="${escapeHtml(g.id)}" class="btn btn-ghost px-4" aria-label="Edit ${escapeHtml(g.name)}">✎ Edit</button>
+              <button data-action="${mode.action}" data-id="${escapeHtml(g.id)}" data-next="${finished ? 'Pending' : mode.done}" ${Store.isPending(key) ? 'disabled' : ''}
+                class="btn ${finished ? 'btn-ghost' : 'btn-primary'}">
+                ${spinnerOr(key, finished ? '↩︎ Mark as Pending' : mode.doneLabel)}
+              </button>
+            </div>
           </article>`;
         }).join('')}
       </div>`;
 
     return `
-      ${pageHeader('Arrivals', 'Pick-ups')}
+      ${pageHeader('Arrivals &amp; departures', 'Pick &amp; Drop')}
+      <div class="flex gap-2 mb-3" role="tablist" aria-label="Pick-up or drop">${modeTab('pickup', '🚐 Pick-up')}${modeTab('drop', '🧳 Drop')}</div>
+      ${addButton('add-pickup', 'Add a guest’s travel')}
       <div class="card p-4 mb-3">
-        <div class="flex justify-between text-sm text-ink-700"><span>${done} of ${total} families welcomed</span><span class="font-semibold">${pct}%</span></div>
+        <div class="flex justify-between text-sm text-ink-700"><span>${done} of ${total} ${mode.welcomed}</span><span class="font-semibold">${pct}%</span></div>
         <div class="mt-2 h-2 rounded-full bg-haldi-100 overflow-hidden"><div class="h-full rounded-full bg-gradient-to-r from-mehndi-400 to-mehndi-600 transition-all w-0" data-progress="${pct}"></div></div>
       </div>
-      <input type="search" data-action="pickup-search" value="${escapeHtml(s.pickupSearch)}" placeholder="Search name, contact, mode…" aria-label="Search pick-ups" class="input" />
+      <input type="search" data-action="pickup-search" value="${escapeHtml(s.pickupSearch)}" placeholder="Search name, contact, mode, email…" aria-label="Search travel plans" class="input" />
       <div class="flex gap-2 my-3 overflow-x-auto no-scrollbar">
-        ${chip('all', `All (${total})`)}${chip('Pending', `Pending (${total - done})`)}${chip('Picked Up', `Picked Up (${done})`)}
+        ${chip('all', `All (${total})`)}${chip('Pending', `Pending (${total - done})`)}${chip(mode.done, `${mode.done} (${done})`)}
       </div>
       ${list.length ? listHtml : empty}`;
+  };
+
+  /** A guest's own pick-up and drop, with whom to call if plans change. */
+  Views.travel = (s) => {
+    const contact = s.familyContact;
+    const contactCard = contact ? `
+      <div class="card p-4 mt-4 flex items-center gap-3">
+        <div class="w-11 h-11 shrink-0 rounded-full bg-haldi-100 grid place-items-center text-xl" aria-hidden="true">🙏</div>
+        <div class="flex-1 min-w-0">
+          <p class="text-xs text-ink-500">Plans changed? Please let us know</p>
+          <p class="font-semibold text-ink-900 truncate">${escapeHtml(contact.name || 'The family')}</p>
+        </div>
+        ${contact.phone ? `<a href="tel:${telHref(contact.phone)}" class="btn btn-primary btn-sm shrink-0">📞 Call</a>` : ''}
+      </div>` : '';
+    const step = (icon, label, when, status, done) => `
+      <div class="flex items-start gap-3">
+        <div class="w-10 h-10 shrink-0 rounded-full ${status === done ? 'bg-mehndi-100' : 'bg-marigold-100'} grid place-items-center text-lg" aria-hidden="true">${icon}</div>
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center justify-between gap-2"><p class="text-sm font-semibold text-ink-900">${label}</p>${badge(status)}</div>
+          <p class="text-xs text-ink-600">${escapeHtml(formatDateTime(when))}</p>
+        </div>
+      </div>`;
+
+    if (s.authStatus === 'offline') return `${pageHeader('Your journey', 'My travel')}${emptyState('📶', 'You’re offline', 'Connect to the internet to see your pick-up and drop.')}${contactCard}`;
+    if (!s.myTravel.length) {
+      return `
+        ${pageHeader('Your journey', 'My travel')}
+        ${emptyState('🚐', 'No travel plans yet', 'Once the family adds your arrival, your pick-up and drop will show up here.')}
+        ${contactCard}`;
+    }
+    return `
+      ${pageHeader('Your journey', 'My travel', 'We will be there to receive you and to see you off. 🌼')}
+      <div class="space-y-3">
+        ${s.myTravel.map((g) => `
+          <article class="card p-4 space-y-3">
+            <div class="flex items-center justify-between gap-2">
+              <h3 class="font-display text-xl text-kumkum-700 truncate">${escapeHtml(g.name)}</h3>
+              ${g.members ? `<span class="text-xs text-ink-500 shrink-0">${escapeHtml(g.members)} guest(s)</span>` : ''}
+            </div>
+            ${step('🚐', 'Pick-up on arrival', g.arrival, g.pickupStatus, 'Picked Up')}
+            ${step('🧳', 'Drop on departure', g.departure, g.dropStatus, 'Dropped Off')}
+            <p class="text-xs text-ink-500">Travelling by <b>${escapeHtml(g.mode || '—')}</b>${g.contact ? ` · we’ll call ${escapeHtml(g.contact)}` : ''}</p>
+          </article>`).join('')}
+      </div>
+      ${contactCard}`;
   };
 
   Views.members = (s) => {
@@ -1186,13 +1346,13 @@
       </ul>`;
 
     return `
-      ${pageHeader('Guest list', 'Members &amp; access', 'Only people on this list can open the app. <b>Admins</b> host the event; <b>Viewers</b> follow the schedule. Every change is recorded in the AuditLog.')}
-      <div class="grid grid-cols-3 gap-2 text-center mb-4">${stat(s.members.length, 'Members')}${stat(adminCount, 'Admins')}${stat(s.members.length - adminCount, 'Viewers')}</div>
+      ${pageHeader('Guest list', 'Members &amp; access', 'Only people on this list can open the app. <b>Admins</b> host the event; <b>Atithis</b> (our guests) follow the schedule. Every change is recorded in the AuditLog.')}
+      <div class="grid grid-cols-3 gap-2 text-center mb-4">${stat(s.members.length, 'Members')}${stat(adminCount, 'Admins')}${stat(s.members.length - adminCount, 'Atithis')}</div>
       <form data-action="add-member" class="card p-4 mb-4 space-y-2" novalidate>
         <label class="block text-xs font-semibold text-ink-500" for="new-member-email">Invite a guest</label>
         <input id="new-member-email" name="email" type="email" inputmode="email" autocomplete="off" required placeholder="guest@gmail.com" class="input" />
         <div class="flex gap-2">
-          <select name="role" aria-label="Role" class="input flex-1">${roleOptions('Viewer')}</select>
+          <select name="role" aria-label="Role" class="input flex-1">${roleOptions(GUEST_ROLE)}</select>
           <button type="submit" ${Store.isPending('member:add') ? 'disabled' : ''} class="btn btn-primary shrink-0 px-6">
             ${spinnerOr('member:add', 'Add')}
           </button>
@@ -1204,6 +1364,7 @@
 
   /* --------------------------------------------------------------- Render */
   const ADMIN_TABS = new Set(['control', 'pickups', 'members']);
+  const GUEST_TABS = new Set(['travel']); // admins see everyone's travel under Pick & Drop
   let lastGateKey = null;
 
   function syncLabel(s, signedIn) {
@@ -1215,8 +1376,20 @@
     return s.lastSynced ? `${tagline} · updated ${timeAgo(s.lastSynced)}` : tagline;
   }
 
+  /** Glide the title only when the full name does not fit the header. */
+  function fitTitle() {
+    const box = $('#app-title');
+    const text = $('#app-title-text');
+    const overflow = Math.ceil(text.scrollWidth - box.clientWidth);
+    box.classList.toggle('is-scrolling', overflow > 4);
+    text.style.setProperty('--marquee-shift', `${-Math.max(overflow, 0)}px`);
+    box.title = text.textContent;
+  }
+
   function renderHeader(s, signedIn) {
-    $('#app-title').textContent = CONFIG.EVENT_NAME || 'Event Companion';
+    const name = CONFIG.EVENT_NAME || 'Event Companion';
+    const title = $('#app-title-text');
+    if (title.textContent !== name) { title.textContent = name; document.title = name; requestAnimationFrame(fitTitle); }
     $('#sync-indicator').textContent = syncLabel(s, signedIn);
     const blessing = $('#app-blessing');
     if (blessing) {
@@ -1244,13 +1417,13 @@
   }
 
   function renderNav(s, signedIn) {
-    if (!s.isAdmin && ADMIN_TABS.has(s.tab)) s.tab = 'schedule';
-    $('#nav-grid').className = `max-w-2xl mx-auto grid ${s.isAdmin ? 'grid-cols-4' : 'grid-cols-1'}`;
-    $('#bottom-nav').classList.toggle('hidden', !signedIn || !s.isAdmin);
+    if ((!s.isAdmin && ADMIN_TABS.has(s.tab)) || (s.isAdmin && GUEST_TABS.has(s.tab))) s.tab = 'schedule';
+    $('#nav-grid').className = `max-w-2xl mx-auto grid ${s.isAdmin ? 'grid-cols-4' : 'grid-cols-2'}`;
+    $('#bottom-nav').classList.toggle('hidden', !signedIn);
     $$('.nav-btn').forEach((btn) => {
-      const adminOnly = btn.classList.contains('admin-only');
-      btn.classList.toggle('hidden', adminOnly && !s.isAdmin);
-      btn.classList.toggle('flex', !adminOnly || s.isAdmin);
+      const shown = btn.classList.contains('admin-only') ? s.isAdmin : !btn.classList.contains('guest-only') || !s.isAdmin;
+      btn.classList.toggle('hidden', !shown);
+      btn.classList.toggle('flex', shown);
       const active = btn.dataset.tab === s.tab;
       btn.classList.toggle('text-kumkum-700', active);
       btn.classList.toggle('text-ink-500', !active);
@@ -1329,16 +1502,38 @@
       return Auth.loadSession();
     },
 
+    /** Self-rescheduling poll with ±20% jitter so many open phones don't hit Apps Script in lock-step. */
     startPolling() {
-      clearInterval(this.timer);
-      this.timer = setInterval(() => {
-        if (document.visibilityState === 'visible' && navigator.onLine) void this.refresh();
-      }, CONFIG.REFRESH_INTERVAL_MS || 60000);
+      clearTimeout(this.timer);
+      const base = Math.max(Number(CONFIG.REFRESH_INTERVAL_MS) || 60000, 15000);
+      const tick = () => {
+        this.timer = setTimeout(() => {
+          if (document.visibilityState === 'visible' && navigator.onLine) void this.refresh();
+          tick();
+        }, base * (0.8 + Math.random() * 0.4));
+      };
+      tick();
     },
   };
 
   /* -------------------------------------------------------------- Actions */
+  const field = (label, control) => `<label class="block"><span class="block text-xs font-semibold text-ink-500 mb-1">${label}</span>${control}</label>`;
+
+  /** Trimmed string values of every named control in a form. */
+  const formValues = (form) => Object.fromEntries([...new FormData(form)].map(([k, v]) => [k, String(v).trim()]));
+
+  /** "19:05" (from <input type="time">) → "7:05 PM", matching how the sheet shows times. */
+  const to12h = (hhmm) => {
+    const m = /^(\d{2}):(\d{2})$/.exec(hhmm || '');
+    if (!m) return '';
+    const h = Number(m[1]);
+    return `${h % 12 || 12}:${m[2]} ${h < 12 ? 'AM' : 'PM'}`;
+  };
+
   const findEvent = (id) => Store.state.itinerary.find((e) => e.id === id);
+
+  /** "2027-01-22T14:30:00+05:30" → "2027-01-22T14:30" for <input type="datetime-local"> (sheet's wall time). */
+  const toLocalInput = (v) => /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})/.exec(String(v || ''))?.[1] || '';
 
   const Actions = {
     async run(key, fn, successMsg) {
@@ -1380,6 +1575,15 @@
       }
     },
 
+    async updateDropoff(id, status) {
+      const data = await this.run(`drop:${id}`, () => Api.post('updateDropoff', { id, status }));
+      if (data) {
+        Store.set({ logistics: data.logistics });
+        const guest = data.logistics.find((g) => g.id === id);
+        Toast.show(`${guest?.name || 'Guest'} drop marked as ${status}`, 'success');
+      }
+    },
+
     async addMember(form) {
       const { email: input, role: roleSelect } = memberFormFields(form);
       const email = input.value.trim().toLowerCase();
@@ -1394,7 +1598,7 @@
     async setRole(email, role) {
       if (email === Store.state.user?.email) { Toast.show('You cannot change your own role.', 'error'); return; }
       if (!window.confirm(`Change ${email} to ${role}?`)) return;
-      const data = await this.run(`member:${email}`, () => Api.post('updateMemberRole', { email, role }), `${email} is now ${role === 'Admin' ? 'an Admin' : 'a Viewer'}`);
+      const data = await this.run(`member:${email}`, () => Api.post('updateMemberRole', { email, role }), `${email} is now ${role === 'Admin' ? 'an Admin' : 'an Atithi'}`);
       if (data) Store.set({ members: data.members });
     },
 
@@ -1403,6 +1607,122 @@
       if (!window.confirm(`Remove ${email}? They will lose access to the app.`)) return;
       const data = await this.run(`member:${email}`, () => Api.post('removeMember', { email }), `${email} removed`);
       if (data) Store.set({ members: data.members });
+    },
+
+    /** Opens a create form in the modal (outside #view, so background refreshes never wipe a draft). */
+    openCreateForm({ eyebrow, title, fields, submitLabel, key, collect, submit }) {
+      Modal.open(`
+        <p class="eyebrow">${eyebrow}</p>
+        <h3 class="font-display text-2xl text-kumkum-700">${title}</h3>
+        <form data-modal="form" class="mt-3 space-y-3" novalidate>
+          ${fields}
+          <div class="grid grid-cols-2 gap-2 pt-1">
+            <button type="button" data-modal="cancel" class="btn btn-ghost">Cancel</button>
+            <button type="submit" data-modal="confirm" class="btn btn-primary">${submitLabel}</button>
+          </div>
+        </form>`, {
+        onMount: (root) => {
+          const form = root.querySelector('form');
+          const confirm = root.querySelector('[data-modal="confirm"]');
+          root.querySelector('[data-modal="cancel"]').addEventListener('click', () => Modal.close());
+          form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const payload = collect(form);
+            if (!payload) return;
+            confirm.disabled = true;
+            confirm.innerHTML = '<span class="spinner"></span>';
+            const ok = await submit(payload, key);
+            if (ok) { Modal.close(); return; }
+            confirm.disabled = false;
+            confirm.textContent = submitLabel;
+          });
+          setTimeout(() => form.querySelector('input')?.focus(), 0); // Modal.open focuses the first button after onMount
+        },
+      });
+    },
+
+    openAddEvent() {
+      const days = [...new Set(Store.state.itinerary.map((e) => e.day).filter(Boolean))];
+      this.openCreateForm({
+        eyebrow: 'Event Control',
+        title: 'Add a ceremony',
+        submitLabel: 'Add ceremony',
+        key: 'event:add',
+        fields: `
+          ${field('Title', '<input name="title" required maxlength="200" placeholder="Haldi" class="input" />')}
+          ${field('Day', `<input name="day" required maxlength="200" list="event-days" placeholder="${escapeHtml(days[0] || 'Sat, Jan 23')}" class="input" />
+            <datalist id="event-days">${days.map((d) => `<option value="${escapeHtml(d)}"></option>`).join('')}</datalist>`)}
+          <div class="grid grid-cols-2 gap-2">
+            ${field('Time', '<input name="time" type="time" class="input" />')}
+            ${field('Location', '<input name="location" maxlength="200" placeholder="Lawn" class="input" />')}
+          </div>
+          <p class="text-xs text-ink-500">New ceremonies start as <b>Upcoming</b>. Use <b>Set Live &amp; Broadcast</b> when it begins.</p>`,
+        collect: (form) => {
+          const v = formValues(form);
+          if (!v.title || !v.day) { Toast.show('Please add a title and a day.', 'error'); return null; }
+          return { title: v.title, day: v.day, time: to12h(v.time), location: v.location };
+        },
+        submit: async (payload, key) => {
+          const data = await this.run(key, () => Api.post('addEvent', payload), `“${payload.title}” added 🪔`);
+          if (data) Store.set({ itinerary: data.itinerary });
+          return !!data;
+        },
+      });
+    },
+
+    /** One form for adding a family's travel and for editing it later (`guest` set → edit mode). */
+    openTravelForm(guest = null) {
+      const editing = !!guest;
+      const g = guest || {};
+      const attr = (v) => escapeHtml(String(v ?? ''));
+      // The sheet may hold free text ("22 Jan, evening") that <input type="datetime-local"> cannot show.
+      const unparsed = (v) => !!v && !toLocalInput(v);
+      const keepNote = (v) => (unparsed(v) ? `<span class="block text-[11px] text-ink-500 mt-1">Currently “${attr(v)}” — leave blank to keep it.</span>` : '');
+      const guests = Store.state.members.filter((m) => m.role !== 'Admin').map((m) => m.email);
+      this.openCreateForm({
+        eyebrow: 'Pick &amp; Drop',
+        title: editing ? `Edit ${attr(g.name)}` : 'Add a guest’s travel',
+        submitLabel: editing ? 'Save changes' : 'Add travel',
+        key: editing ? `travel:${g.id}` : 'pickup:add',
+        fields: `
+          ${field('Family / guest name', `<input name="name" required maxlength="200" placeholder="Sharma family" value="${attr(g.name)}" class="input" />`)}
+          <div class="grid grid-cols-2 gap-2">
+            ${field('Guests', `<input name="members" type="number" inputmode="numeric" min="1" max="500" placeholder="4" value="${attr(g.members)}" class="input" />`)}
+            ${field('Contact', `<input name="contact" type="tel" inputmode="tel" maxlength="30" placeholder="+91 98765 43210" value="${attr(g.contact)}" class="input" />`)}
+          </div>
+          ${field('Guest’s Google email (so they see it in “My travel”)', `<input name="email" type="email" inputmode="email" maxlength="254" list="travel-guests" placeholder="guest@gmail.com" value="${attr(g.email)}" class="input" />
+            <datalist id="travel-guests">${guests.map((e) => `<option value="${attr(e)}"></option>`).join('')}</datalist>`)}
+          ${field('Arrival (pick-up)', `<input name="arrival" type="datetime-local" value="${attr(toLocalInput(g.arrival))}" class="input" />${keepNote(g.arrival)}`)}
+          ${field('Departure (drop)', `<input name="departure" type="datetime-local" value="${attr(toLocalInput(g.departure))}" class="input" />${keepNote(g.departure)}`)}
+          <div class="grid grid-cols-2 gap-2">
+            ${field('Mode', `<input name="mode" maxlength="200" list="pickup-modes" placeholder="Flight" value="${attr(g.mode)}" class="input" />
+              <datalist id="pickup-modes">${['Flight', 'Train', 'Car', 'Bus'].map((m) => `<option value="${m}"></option>`).join('')}</datalist>`)}
+            ${editing ? '' : field('Pick-up status', '<select name="pickupStatus" class="input"><option>Pending</option><option>Picked Up</option></select>')}
+          </div>`,
+        collect: (form) => {
+          const v = formValues(form);
+          if (!v.name) { Toast.show('Please add a name.', 'error'); return null; }
+          v.email = v.email.toLowerCase();
+          if (v.email && (v.email.length > 254 || !EMAIL_RE.test(v.email))) { Toast.show('Enter a valid email address, or leave it blank.', 'error'); return null; }
+          if (v.arrival && v.departure && v.departure < v.arrival) { Toast.show('Departure must be after arrival.', 'error'); return null; }
+          if (!editing) return v;
+          // Leave untouched free-text times alone instead of wiping them.
+          ['arrival', 'departure'].forEach((k) => { if (!v[k] && unparsed(g[k])) delete v[k]; });
+          return { ...v, id: g.id };
+        },
+        submit: async (payload, key) => {
+          const data = editing
+            ? await this.run(key, () => Api.post('updateLogistics', payload), (r) => (r.changed?.length ? `${payload.name} updated ✎` : 'Nothing to change'))
+            : await this.run(key, () => Api.post('addPickup', payload), `${payload.name} added 🚐`);
+          if (data) Store.set({ logistics: data.logistics });
+          return !!data;
+        },
+      });
+    },
+
+    openEditTravel(id) {
+      const guest = Store.state.logistics.find((g) => g.id === id);
+      if (guest) this.openTravelForm(guest);
     },
 
     openBroadcast(eventId) {
@@ -1441,8 +1761,10 @@
             <p class="text-sm text-ink-500 truncate">${escapeHtml(s.user.email)}</p>
           </div>
         </div>
-        <p class="mt-4 text-sm text-ink-700">${s.isAdmin ? 'You are a <b>host (Admin)</b> — you can run the schedule, pick-ups and the guest list.' : 'You are our honoured <b>guest</b> — follow the schedule and live updates right here.'}</p>
+        <p class="mt-4 text-sm text-ink-700">${s.isAdmin ? 'You are a <b>host (Admin)</b> — you can run the schedule, pick-ups &amp; drops and the guest list.' : 'You are our honoured <b>guest</b> — follow the schedule, live updates and your travel right here.'}</p>
         <button data-modal="tour" class="btn btn-ghost w-full mt-4">🪔 Replay the welcome tour</button>
+        ${isStandalone() ? '' : '<button data-modal="install" class="btn btn-ghost w-full mt-2">📲 Install this app</button>'}
+        ${s.isAdmin ? '<button data-modal="install-link" class="btn btn-ghost w-full mt-2">🔗 Copy the install link for guests</button>' : ''}
         <div class="grid grid-cols-2 gap-2 mt-2">
           <button data-modal="cancel" class="btn btn-ghost">Close</button>
           <button data-modal="signout" class="btn btn-danger">Sign out</button>
@@ -1451,8 +1773,20 @@
           root.querySelector('[data-modal="cancel"]').addEventListener('click', () => Modal.close());
           root.querySelector('[data-modal="tour"]').addEventListener('click', () => { Modal.close(); setTimeout(() => Tour.start({ replay: true }), 50); });
           root.querySelector('[data-modal="signout"]').addEventListener('click', () => Auth.signOut());
+          root.querySelector('[data-modal="install"]')?.addEventListener('click', () => { Modal.close(); void Install.start(); });
+          root.querySelector('[data-modal="install-link"]')?.addEventListener('click', () => { void this.copyInstallLink(); });
         },
       });
+    },
+
+    async copyInstallLink() {
+      const link = Install.link();
+      try {
+        await navigator.clipboard.writeText(link);
+        Toast.show('Install link copied — share it on WhatsApp 📲', 'success');
+      } catch {
+        window.prompt('Copy this install link:', link);
+      }
     },
   };
 
@@ -1478,12 +1812,17 @@
       switch (action) {
         case 'refresh': void Data.refresh(); break;
         case 'open-broadcast': Actions.openBroadcast(id); break;
+        case 'add-event': Actions.openAddEvent(); break;
+        case 'add-pickup': Actions.openTravelForm(); break;
+        case 'edit-pickup': Actions.openEditTravel(id); break;
+        case 'logistics-mode': Store.set({ logisticsMode: el.dataset.value === 'drop' ? 'drop' : 'pickup', pickupFilter: 'all' }); break;
         case 'share-whatsapp': {
           const ev = findEvent(id);
           if (ev) WhatsApp.open(WhatsApp.buildMessage(ev));
           break;
         }
         case 'toggle-pickup': void Actions.updatePickup(id, el.dataset.next); break;
+        case 'toggle-dropoff': void Actions.updateDropoff(id, el.dataset.next); break;
         case 'remove-member': void Actions.removeMember(el.dataset.email); break;
         case 'pickup-filter': Store.set({ pickupFilter: el.dataset.value }); break;
         case 'jump-day': $(`#day-${Number(el.dataset.day)}`)?.scrollIntoView({ behavior: reducedMotion() ? 'auto' : 'smooth', block: 'start' }); break;
@@ -1496,7 +1835,7 @@
       if (roleSel) {
         const member = Store.state.members.find((m) => m.email === roleSel.dataset.email);
         const role = roleSel.value;
-        roleSel.value = member?.role || 'Viewer'; // revert until the server confirms
+        roleSel.value = member?.role || GUEST_ROLE; // revert until the server confirms
         if (member && role !== member.role) void Actions.setRole(member.email, role);
         return;
       }
@@ -1555,6 +1894,10 @@
     void Auth.init();
     Auth.scheduleRenewal();
     Data.startPolling();
+    fitTitle();
+    document.fonts?.ready.then(fitTitle).catch(() => {});
+    let resizeTimer;
+    window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(fitTitle, 150); });
   }
 
   // Pure helpers exposed for unit tests. No state or actions, so nothing here grants privileges.

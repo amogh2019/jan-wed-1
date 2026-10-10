@@ -129,5 +129,17 @@
   .petal { display: none; }
 }
 
+/* ---------- Header title marquee ----------
+   The full event name stays readable: when it is wider than the header it glides left, rests,
+   and glides back. app.js sets --marquee-shift (CSSOM, so the CSP needs no inline styles). */
+@keyframes marqueeGlide { 0%, 15% { transform: translateX(0); } 50%, 65% { transform: translateX(var(--marquee-shift, 0px)); } 100% { transform: translateX(0); } }
+.marquee { overflow: hidden; white-space: nowrap; }
+.marquee-text { display: inline-block; padding-right: .25rem; }
+.marquee.is-scrolling .marquee-text { animation: marqueeGlide 11s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .marquee.is-scrolling .marquee-text { animation: none; }
+  .marquee { white-space: normal; font-size: 1.1rem; }
+}
+
 /* <output> is inline by default; the offline banner is a block when shown. */
 #banner-offline:not(.hidden) { display: block; }

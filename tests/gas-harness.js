@@ -85,6 +85,7 @@ function createBackend({ members = [['admin@example.com', 'Admin', 'seed', '']],
       base64DecodeWebSafe: (s) => Buffer.from(s, 'base64url'),
       newBlob: (bytes) => ({ getDataAsString: () => Buffer.from(bytes).toString('utf8') }),
       formatDate: (d) => new Date(d).toISOString(),
+      parseDate: (str) => new Date(`${str}:00Z`), // spreadsheet time zone is UTC in the harness
     },
     UrlFetchApp: {
       fetch: (url, opts) => {

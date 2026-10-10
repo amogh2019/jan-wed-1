@@ -4,7 +4,11 @@
  * (The OneSignal REST API key lives ONLY in Apps Script "Script Properties".)
  */
 window.APP_CONFIG = Object.freeze({
+  // App name everywhere: header, browser tab and the installed app's name.
+  // After changing it run `npm run sync:config` (copies it into manifest.json / index.html).
   EVENT_NAME: 'Kaus-Anch : Our 3-Day Celebration',
+  // Optional shorter name under the home-screen icon ('' = use EVENT_NAME).
+  APP_SHORT_NAME: '',
   EVENT_TAGLINE: 'Schedule, live updates & pick-ups',
   // Optional: shown on the invitation screen and in the header ('' to hide)
   EVENT_DATES: '23 - 25 January 2027',                       // e.g. '12 – 14 January 2027'
