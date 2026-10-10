@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <!-- GitHub Pages cannot send security headers, so the policy is delivered here.
+       frame-ancestors is ignored in <meta>; app.js frame-busts instead. -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'self';
+    script-src 'self' https://accounts.google.com/gsi/client https://cdn.onesignal.com https://onesignal.com;
+    style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style https://onesignal.com https://cdn.onesignal.com;
+    img-src 'self' data: https://*.googleusercontent.com https://onesignal.com https://img.onesignal.com;
+    font-src 'self' https://onesignal.com;
+    connect-src 'self' https://script.google.com https://script.googleusercontent.com https://accounts.google.com/gsi/ https://onesignal.com https://*.onesignal.com;
+    frame-src https://accounts.google.com/gsi/ https://onesignal.com;
+    worker-src 'self';
+    manifest-src 'self';
+    object-src 'none';
+    base-uri 'self';
+    form-action 'self'" />
+  <meta name="referrer" content="strict-origin-when-cross-origin" />
+  <title>Event Companion</title>
+  <meta name="description" content="Live schedule, notifications and pick-up coordination for our 3-day celebration." />
+  <meta name="theme-color" content="#641224" />
+  <link rel="preload" href="fonts/poppins-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="preload" href="fonts/yatra-one-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin />
+
+  <!-- PWA / iOS -->
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Event" />
+
+  <!-- Precompiled Tailwind (npm run build:css). No CDN script, so the CSP needs no 'unsafe-eval'/'unsafe-inline' scripts. -->
+  <link rel="stylesheet" href="styles.css" />
+
+  <!-- Google Identity Services & OneSignal Web SDK v16 -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
+</head>
+
+<body class="text-ink-900 antialiased min-h-screen font-sans">
+  <a href="#view" class="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:rounded-lg focus:bg-white focus:px-3 focus:py-2 focus:text-sm">Skip to content</a>
+
+  <!-- Header -->
+  <header class="safe-top sticky top-0 z-30 text-white">
+    <div class="header-silk shadow-lg">
+      <div class="max-w-2xl mx-auto px-4 pt-3 pb-2.5 flex items-center gap-3">
+        <img src="icons/icon-192.png" alt="" width="40" height="40" class="w-10 h-10 rounded-xl ring-2 ring-haldi-300/60 shadow" />
+        <div class="flex-1 min-w-0">
+          <p id="app-blessing" class="hidden font-display text-[11px] leading-none text-haldi-200/90 truncate"></p>
+          <h1 id="app-title" class="font-display text-[1.35rem] leading-tight truncate text-foil">Event Companion</h1>
+          <p id="sync-indicator" class="text-[11px] text-kumkum-100/90 truncate" aria-live="polite">Loading…</p>
+        </div>
+        <button id="refresh-btn" type="button" aria-label="Refresh" title="Refresh" class="hidden w-10 h-10 grid place-items-center rounded-full hover:bg-white/10 active:bg-white/20">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.6M20 20v-5h-.6M5.1 9A8 8 0 0119 8.5M18.9 15A8 8 0 015 15.5"/></svg>
+        </button>
+        <button id="account-btn" type="button" aria-label="Your account" class="hidden flex items-center gap-2 rounded-full bg-white/10 hover:bg-white/20 ring-1 ring-haldi-300/40 pl-1 pr-3 py-1 text-xs font-semibold">
+          <span id="account-avatar" class="w-7 h-7 rounded-full bg-haldi-300 text-kumkum-800 grid place-items-center text-xs font-bold overflow-hidden">?</span>
+          <span id="account-label">Member</span>
+        </button>
+      </div>
+    </div>
+    <div class="toran" aria-hidden="true"></div>
+  </header>
+
+  <!-- Banners -->
+  <div id="banners" class="max-w-2xl mx-auto px-4 space-y-2">
+    <div id="banner-offline" role="status" class="hidden rounded-xl bg-marigold-100 text-marigold-900 border border-marigold-200 px-4 py-2.5 text-sm">
+      You're offline. Showing the last saved schedule.
+    </div>
+
+    <div id="banner-notify" class="hidden card mandala-watermark p-4 items-center gap-3">
+      <div class="w-11 h-11 shrink-0 rounded-full bg-marigold-100 grid place-items-center text-xl" aria-hidden="true">🔔</div>
+      <div class="flex-1 min-w-0">
+        <p class="font-semibold text-sm text-kumkum-800">Never miss a ceremony</p>
+        <p id="notify-text" class="text-xs text-ink-500">Get an alert the moment an event goes live.</p>
+      </div>
+      <button id="notify-btn" type="button" class="btn-primary btn-sm shrink-0">Turn on Notifications</button>
+    </div>
+
+    <div id="banner-install" class="hidden rounded-2xl bg-kumkum-900 text-ivory-100 p-4 items-center gap-3 shadow-lift">
+      <div class="text-2xl" aria-hidden="true">📲</div>
+      <p id="install-text" class="flex-1 text-sm">Add this app to your home screen for quick access during the celebrations.</p>
+      <button id="install-btn" type="button" class="hidden btn-gold btn-sm shrink-0">Install</button>
+      <button id="install-dismiss" type="button" aria-label="Dismiss" class="shrink-0 w-9 h-9 grid place-items-center rounded-full text-ivory-300 hover:text-white hover:bg-white/10">✕</button>
+    </div>
+  </div>
+
+  <!-- Main content (rendered by app.js) -->
+  <main id="view" tabindex="-1" class="max-w-2xl mx-auto px-4 pt-3 pb-32 focus:outline-none">
+    <div class="space-y-3" aria-hidden="true">
+      <div class="skeleton h-28 rounded-2xl"></div>
+      <div class="skeleton h-20 rounded-2xl"></div>
+      <div class="skeleton h-20 rounded-2xl"></div>
+    </div>
+  </main>
+
+  <!-- Bottom navigation (admins) -->
+  <nav id="bottom-nav" aria-label="Sections" class="hidden safe-bottom fixed bottom-0 inset-x-0 z-30 bg-ivory-50/95 backdrop-blur border-t border-haldi-200 shadow-[0_-6px_20px_-12px_rgb(74_13_26/.25)]">
+    <div class="max-w-2xl mx-auto grid grid-cols-1" id="nav-grid">
+      <button type="button" data-tab="schedule" class="nav-btn flex flex-col items-center gap-0.5 pt-2 pb-1.5 text-[11px] font-semibold">
+        <span class="nav-pill grid place-items-center w-14 h-8 rounded-full transition">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15" rx="2.5"/><path stroke-linecap="round" d="M3.5 10h17M8 3v4M16 3v4"/></svg>
+        </span>Schedule
+      </button>
+      <button type="button" data-tab="control" class="nav-btn admin-only hidden flex-col items-center gap-0.5 pt-2 pb-1.5 text-[11px] font-semibold">
+        <span class="nav-pill grid place-items-center w-14 h-8 rounded-full transition">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3c2.5 3 3 5.5 0 8-3-2.5-2.5-5 0-8zM4 14h16l-1.5 4.5a2 2 0 01-1.9 1.5H7.4a2 2 0 01-1.9-1.5L4 14z"/></svg>
+        </span>Control
+      </button>
+      <button type="button" data-tab="pickups" class="nav-btn admin-only hidden flex-col items-center gap-0.5 pt-2 pb-1.5 text-[11px] font-semibold">
+        <span class="nav-pill grid place-items-center w-14 h-8 rounded-full transition">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16V8a2 2 0 012-2h9l4 4h1a2 2 0 012 2v4h-2M3 16h2m4 0h6"/><circle cx="7" cy="16.5" r="2"/><circle cx="17" cy="16.5" r="2"/></svg>
+        </span>Pick-ups
+      </button>
+      <button type="button" data-tab="members" class="nav-btn admin-only hidden flex-col items-center gap-0.5 pt-2 pb-1.5 text-[11px] font-semibold">
+        <span class="nav-pill grid place-items-center w-14 h-8 rounded-full transition">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path stroke-linecap="round" d="M3 19c.8-3.2 3.2-5 6-5s5.2 1.8 6 5M16 5.5a3 3 0 010 5.5M18 14c1.6.6 2.6 2.2 3 5"/></svg>
+        </span>Members
+      </button>
+    </div>
+  </nav>
+
+  <!-- Modal & toast roots -->
+  <div id="modal-root"></div>
+  <div id="toast-root" aria-live="polite" class="fixed z-50 inset-x-0 bottom-24 flex flex-col items-center gap-2 px-4 pointer-events-none"></div>
+
+  <noscript>
+    <div class="p-6 text-center text-ink-600">Please enable JavaScript to open this app.</div>
+  </noscript>
+
+  <script src="config.js"></script>
+  <script src="app.js" defer></script>
+</body>
+</html>
