@@ -2151,6 +2151,7 @@
     Auth.scheduleRenewal();
     Data.startPolling();
     fitTitle();
+    if ('ResizeObserver' in window) new ResizeObserver(fitTitle).observe($('#app-title'));
     document.fonts?.ready.then(fitTitle).catch(() => {});
     let resizeTimer;
     window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(fitTitle, 150); });

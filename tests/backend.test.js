@@ -250,9 +250,70 @@ test('setup: creates missing tabs and headers on an empty workbook', () => {
   assert.deepEqual(b.sheets.Itinerary.data[0], ['EventID', 'Day', 'Time', 'Title', 'Location', 'Status', 'MapLink', 'Group']);
   assert.deepEqual(b.sheets.Members.data[0], ['Email', 'Role', 'AddedBy', 'AddedDate', 'TourStatus', 'TourCompletedAt', 'Groups', 'NotificationsClearedAt']);
   assert.deepEqual(b.sheets.Notifications.data[0], ['Timestamp', 'Title', 'Message', 'EventID', 'Groups', 'SentBy', 'PushStatus']);
+  assert.deepEqual(b.sheets.Groups?.data?.[0], ['Label', 'Status']);
   assert.ok(b.properties.PUSH_ID_SECRET, 'push-ID secret generated');
   assert.equal(b.sheets.Members.data[1][0], 'owner@example.com');
   assert.equal(b.sheets.Members.data[1][1], 'Admin');
+});
+
+test('setup: seeds existing group assignments into the registry without rewriting them', () => {
+  const b = createBackend({
+    overrides: {
+      Groups: null,
+      Members: [
+        ['Email', 'Role', 'AddedBy', 'AddedDate', 'Groups'],
+        [ADMIN, 'Admin', 'seed', '', 'Family, Bride side'],
+        [VIEWER, 'Atithi', ADMIN, '', 'family, Hosts'],
+      ],
+      Itinerary: [
+        ['EventID', 'Day', 'Time', 'Title', 'Location', 'Status', 'Group'],
+        ['1', 'Day 1', '', 'Welcome', '', 'Upcoming', 'Bride Side, Hosts'],
+      ],
+    },
+  });
+  const memberGroupsBefore = b.sheets.Members.data.slice(1).map((row) => row[4]);
+  const eventGroupsBefore = b.sheets.Itinerary.data.slice(1).map((row) => row[6]);
+  b.sandbox.setup();
+
+  assert.deepEqual(b.sheets.Groups?.data?.slice(1), [
+    ['Family', 'Active'],
+    ['Bride side', 'Active'],
+    ['Hosts', 'Active'],
+  ]);
+  const memberGroupsColumn = b.sheets.Members.data[0].indexOf('Groups');
+  const eventGroupsColumn = b.sheets.Itinerary.data[0].indexOf('Group');
+  assert.deepEqual(b.sheets.Members.data.slice(1).map((row) => row[memberGroupsColumn]), memberGroupsBefore);
+  assert.deepEqual(b.sheets.Itinerary.data.slice(1).map((row) => row[eventGroupsColumn]), eventGroupsBefore);
+  const snapshot = JSON.stringify(b.sheets.Groups.data);
+  const audits = b.audit().length;
+  b.sandbox.setup();
+  assert.equal(JSON.stringify(b.sheets.Groups.data), snapshot);
+  assert.equal(b.audit().length, audits);
+});
+
+test('groups: create and archive labels with validation, admin authorization, and audit entries', () => {
+  const b = createBackend({ members: [[ADMIN, 'Admin', 'seed', ''], [VIEWER, 'Atithi', ADMIN, '']] });
+  b.sandbox.setup();
+  const created = b.call(ADMIN, 'addGroup', { label: '  Bride   side  ' });
+  assert.equal(created.ok, true);
+  assert.deepEqual(created.data.groupCatalog, [{ label: 'Bride side', status: 'Active' }]);
+  assert.deepEqual(b.sheets.Groups.data[1], ['Bride side', 'Active']);
+  assert.match(b.audit().at(-1)[3], /Added group "Bride side"/);
+
+  assert.equal(b.call(ADMIN, 'addGroup', { label: 'bride side' }).code, 'CONFLICT');
+  assert.equal(b.call(ADMIN, 'addGroup', { label: 'A,B' }).code, 'BAD_REQUEST');
+  assert.equal(b.call(ADMIN, 'addGroup', { label: '<b>' }).code, 'BAD_REQUEST');
+  assert.equal(b.call(VIEWER, 'addGroup', { label: 'Guest group' }).code, 'FORBIDDEN');
+  assert.equal(b.call(VIEWER, 'archiveGroup', { label: 'Bride side' }).code, 'FORBIDDEN');
+
+  const archived = b.call(ADMIN, 'archiveGroup', { label: 'bride SIDE' });
+  assert.equal(archived.ok, true);
+  assert.deepEqual(b.sheets.Groups.data[1], ['Bride side', 'Archived']);
+  assert.deepEqual(archived.data.groupCatalog, [{ label: 'Bride side', status: 'Archived' }]);
+  assert.match(b.audit().at(-1)[3], /Archived group "Bride side"/);
+  const auditCount = b.audit().length;
+  assert.equal(b.call(ADMIN, 'archiveGroup', { label: 'missing' }).code, 'NOT_FOUND');
+  assert.equal(b.audit().length, auditCount);
 });
 
 test('setup: existing data is preserved; missing columns appended; only blank cells backfilled', () => {

@@ -155,7 +155,7 @@ const assert = (cond, msg) => {
   console.log(`  ✓ ${msg}`);
 };
 
-async function newPage(browser, backend, query = '') {
+async function newPage(browser, backend, query = '', eventName = 'Test Fest') {
   const ctx = await browser.newContext({ serviceWorkers: 'block' });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log('PAGE ERROR', e.message));
@@ -164,7 +164,8 @@ async function newPage(browser, backend, query = '') {
     window.__cspViolations = [];
     document.addEventListener('securitypolicyviolation', (e) => window.__cspViolations.push(`${e.violatedDirective} ${e.blockedURI}`));
   });
-  await page.route('**/config.js', (r) => r.fulfill({ body: CONFIG, contentType: 'text/javascript' }));
+  const pageConfig = CONFIG.replace("EVENT_NAME: 'Test Fest'", `EVENT_NAME: ${JSON.stringify(eventName)}`);
+  await page.route('**/config.js', (r) => r.fulfill({ body: pageConfig, contentType: 'text/javascript' }));
   await page.route('https://accounts.google.com/**', (r) => r.fulfill({ body: GSI_STUB, contentType: 'text/javascript' }));
   await page.route('https://cdn.onesignal.com/**', (r) => r.fulfill({ body: ONESIGNAL_STUB, contentType: 'text/javascript' }));
   await page.route('https://script.google.com/**', async (r) => {
@@ -228,6 +229,29 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     await page.waitForSelector('text=Namaste');
     const bar = await page.$eval('[data-progress]', (e) => ({ want: `${e.dataset.progress}%`, got: e.style.width }));
     assert(bar.got === bar.want, 'progress bar width applied without inline style attributes');
+
+    console.log('Marquee recalculates when sign-in controls narrow the header');
+    const marqueePage = await newPage(browser, backend, '', 'A Long Celebration Name That Must Fully Scroll Across the Header');
+    await marqueePage.setViewportSize({ width: 390, height: 844 });
+    await marqueePage.waitForSelector('#fake-gsi');
+    await marqueePage.evaluate(() => document.fonts.ready);
+    await marqueePage.waitForTimeout(200);
+    const initialTitleWidth = await marqueePage.$eval('#app-title', (box) => box.clientWidth);
+    await signIn(marqueePage, 'admin@gmail.com');
+    await enter(marqueePage);
+    await marqueePage.waitForTimeout(200);
+    const marqueeMeasurement = await marqueePage.evaluate(() => {
+      const box = document.querySelector('#app-title');
+      const text = document.querySelector('#app-title-text');
+      return {
+        boxWidth: box.clientWidth,
+        shift: Math.abs(parseFloat(getComputedStyle(text).getPropertyValue('--marquee-shift')) || 0),
+        required: Math.ceil(text.scrollWidth - box.clientWidth),
+      };
+    });
+    assert(marqueeMeasurement.boxWidth < initialTitleWidth, 'sign-in controls reduce available title width without a window resize');
+    assert(marqueeMeasurement.shift >= marqueeMeasurement.required, 'marquee endpoint covers the complete current text overflow');
+    await marqueePage.close();
 
     console.log('One-time guided tour');
     await page.waitForSelector('#tour-root [data-tour="card"]');

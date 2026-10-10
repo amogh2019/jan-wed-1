@@ -43,6 +43,7 @@ var SHEETS = {
   MEMBERS: 'Members',
   AUDIT: 'AuditLog',
   NOTIFICATIONS: 'Notifications', // in-app notification centre (one row per announcement sent)
+  GROUPS: 'Groups', // canonical audience label registry
   LEGACY_ADMINS: 'Admins', // migrated into Members by setup()
 };
 
@@ -52,6 +53,7 @@ var HEADERS = {
   Members: ['Email', 'Role', 'AddedBy', 'AddedDate'],
   AuditLog: ['Timestamp', 'UserEmail', 'ActionCategory', 'Details'],
   Notifications: ['Timestamp', 'Title', 'Message', 'EventID', 'Groups', 'SentBy', 'PushStatus'],
+  Groups: ['Label', 'Status'],
 };
 
 // Columns added in later versions. Read paths tolerate their absence; setup()
@@ -224,6 +226,7 @@ function buildSession_(user, admin) {
     session.logistics = logistics;
     session.members = readMembers_();
     session.knownGroups = knownGroups_(session.members, itinerary);
+    session.groupCatalog = readGroupCatalog_();
   }
   return session;
 }
@@ -468,6 +471,32 @@ var ACTIONS_ = {
         String(row.values.Title || '').trim() + '") from ' + audienceLabel_(previous) + ' to ' + audienceLabel_(groups), req.timestamp);
     }
     return { itinerary: refreshItineraryCache_() };
+  },
+
+  addGroup: function (payload, user, req) {
+    var label = requireGroupLabel_(payload.label);
+    var catalog = readGroupCatalog_();
+    if (catalog.some(function (group) { return group.label.toLowerCase() === label.toLowerCase(); })) {
+      throw new AppError('CONFLICT', 'A group with that label already exists.');
+    }
+    var table = readTable_(SHEETS.GROUPS);
+    appendRecord_(table, { Label: label, Status: 'Active' });
+    writeAudit_(user.email, AUDIT_CATEGORY.ADMIN, 'Added group "' + label + '"', req.timestamp);
+    return { groupCatalog: readGroupCatalog_() };
+  },
+
+  archiveGroup: function (payload, user, req) {
+    var label = requireGroupLabel_(payload.label);
+    var table = readTable_(SHEETS.GROUPS);
+    var row = table.rows.find(function (candidate) {
+      return String(candidate.values.Label || '').trim().toLowerCase() === label.toLowerCase();
+    });
+    if (!row) throw new AppError('NOT_FOUND', 'Group "' + label + '" does not exist.');
+    if (String(row.values.Status || '').trim() !== 'Archived') {
+      setCell_(table, row, 'Status', 'Archived');
+      writeAudit_(user.email, AUDIT_CATEGORY.ADMIN, 'Archived group "' + String(row.values.Label).trim() + '"', req.timestamp);
+    }
+    return { groupCatalog: readGroupCatalog_() };
   },
 
   updateMemberRole: function (payload, user, req) {
@@ -803,6 +832,51 @@ function requireGroups_(value) {
     }
   });
   return groups;
+}
+
+function requireGroupLabel_(value) {
+  var label = requireString_(value, 'label').replace(/\s+/g, ' ').trim();
+  if (label.length > MAX_GROUP_LEN || label.indexOf(',') >= 0 || !GROUP_RE.test(label)) {
+    throw new AppError('BAD_REQUEST', 'Group label must be up to ' + MAX_GROUP_LEN + ' characters without commas or unsafe characters.');
+  }
+  return label;
+}
+
+function readGroupCatalog_() {
+  if (!SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEETS.GROUPS)) return [];
+  return readTable_(SHEETS.GROUPS).rows
+    .map(function (row) {
+      var label = String(row.values.Label || '').trim();
+      var status = String(row.values.Status || '').trim();
+      return label ? { label: label, status: status === 'Active' ? 'Active' : 'Archived' } : null;
+    })
+    .filter(function (group) { return group !== null; })
+    .sort(function (a, b) {
+      var lowerA = a.label.toLowerCase();
+      var lowerB = b.label.toLowerCase();
+      return lowerA < lowerB ? -1 : lowerA > lowerB ? 1 : 0;
+    });
+}
+
+function seedGroupCatalog_() {
+  var table = readTable_(SHEETS.GROUPS);
+  var existing = Object.create(null);
+  table.rows.forEach(function (row) {
+    var label = String(row.values.Label || '').trim();
+    if (label) existing[label.toLowerCase()] = true;
+  });
+  var labels = [];
+  readMembers_().forEach(function (member) { labels = labels.concat(member.groups); });
+  readItinerary_().forEach(function (event) { labels = labels.concat(event.groups); });
+  var seeded = 0;
+  parseGroups_(labels.join(',')).forEach(function (label) {
+    var key = label.toLowerCase();
+    if (existing[key]) return;
+    appendRecord_(table, { Label: label, Status: 'Active' });
+    existing[key] = true;
+    seeded += 1;
+  });
+  return seeded;
 }
 
 /** True when an item for `targetGroups` is meant for someone in `memberGroups`. No target groups = everyone. */
@@ -1406,6 +1480,9 @@ function setup() {
     var n = backfillDefaults_(name);
     if (n) report.push(name + ': backfilled ' + n + ' blank cell(s) with defaults');
   });
+
+  var seededGroups = seedGroupCatalog_();
+  if (seededGroups) report.push('Groups: seeded ' + seededGroups + ' label(s) from existing assignments');
 
   if (!getProp_('PUSH_ID_SECRET', false)) {
     pushSecret_();
