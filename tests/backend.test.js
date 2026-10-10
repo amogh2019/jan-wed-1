@@ -703,6 +703,26 @@ test('push: a labelled event with nobody in the group is not sent but still logg
   assert.match(b.sheets.Notifications.data.at(-1)[6], /^Failed:/);
 });
 
+test('push click URL opens the app notification center', () => {
+  const b = createBackend({ props: { APP_URL: 'https://example.github.io/event/' } });
+  b.call(ADMIN, 'updateEvent', { eventId: '1', status: 'Live', notify: true });
+  const push = JSON.parse(b.fetches.find((f) => f.url.includes('onesignal')).opts.payload);
+  assert.equal(push.url, 'https://example.github.io/event/?open=notifications');
+});
+
+test('notification push errors are visible to admins only', () => {
+  const b = createBackend({
+    members: [[ADMIN, 'Admin', 'seed', ''], [VIEWER, 'Atithi', ADMIN, '']],
+    props: { ONESIGNAL_APP_ID: '' },
+  });
+  b.call(ADMIN, 'updateEvent', { eventId: '1', status: 'Live', notify: true });
+  const adminNotice = b.call(ADMIN, 'session').data.notifications[0];
+  const guestNotice = b.call(VIEWER, 'session').data.notifications[0];
+  assert.match(adminNotice.pushStatus, /^Failed:/);
+  assert.equal(guestNotice.pushStatus, undefined);
+  assert.equal(guestNotice.sentBy, undefined);
+});
+
 test('notifications: Live announcements are logged, filtered by group, and Clear hides them per member', () => {
   const b = grouped();
   registerGroups(b, ['Bride side']);

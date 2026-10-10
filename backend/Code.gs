@@ -774,7 +774,10 @@ function sendLivePush_(event) {
   }
   body.include_aliases = { external_id: ids };
   var appUrl = getProp_('APP_URL', false);
-  if (appUrl) body.url = appUrl;
+  if (appUrl) {
+    var separator = /[?&]$/.test(appUrl) ? '' : (appUrl.indexOf('?') >= 0 ? '&' : '?');
+    body.url = appUrl + separator + 'open=notifications';
+  }
 
   try {
     var res = UrlFetchApp.fetch('https://api.onesignal.com/notifications?c=push', {

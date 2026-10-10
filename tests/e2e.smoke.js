@@ -65,6 +65,8 @@ function makeBackend() {
   const email = (tok) => JSON.parse(Buffer.from(tok.split('.')[1], 'base64url').toString()).email;
   return {
     audit, members, itinerary, logistics, notifications, groupCatalog, calls: 0, tourCalls: [], expireNext: false, failNextAction: null,
+    ignoreAudienceFilters: false,
+    exposeNoticeMetadataToGuests: false,
     handle(body) {
       this.calls += 1;
       const me = email(body.idToken);
@@ -80,12 +82,15 @@ function makeBackend() {
         const myGroups = m.groups || [];
         const matching = (groups) => !groups?.length || groups.some((g) => myGroups.some((mine) => mine.toLowerCase() === g.toLowerCase()));
         const cutoff = clearedNotifications.get(me) || 0;
-        const visibleNotifications = notifications.filter((n) => (isAdmin || matching(n.groups)) && Date.parse(n.at) > cutoff);
+        const visibleNotifications = notifications.filter((n) =>
+          (isAdmin || this.ignoreAudienceFilters || matching(n.groups)) && Date.parse(n.at) > cutoff);
         return { ok: true, data: { email: me, name: me, role: m.role, isAdmin, tourStatus: m.tourStatus,
           groups: myGroups, knownGroups: [...new Set(members.flatMap((x) => x.groups || []).concat(itinerary.flatMap((x) => x.groups || [])))],
           groupCatalog: isAdmin ? groupCatalog : undefined,
-          itinerary: isAdmin ? itinerary : itinerary.filter((e) => matching(e.groups)),
-          notifications: isAdmin ? visibleNotifications : visibleNotifications.map(({ sentBy, pushStatus, ...n }) => n),
+          itinerary: isAdmin || this.ignoreAudienceFilters ? itinerary : itinerary.filter((e) => matching(e.groups)),
+          notifications: isAdmin || this.exposeNoticeMetadataToGuests
+            ? visibleNotifications
+            : visibleNotifications.map(({ sentBy, pushStatus, ...n }) => n),
           pushId: `m_${(me === 'viewer@gmail.com' ? 'a' : 'b').repeat(40)}`,
           myTravel, familyContact, ...(isAdmin ? { logistics, members } : {}) } };
       }
@@ -322,6 +327,30 @@ async function assertTourStep(page, id, tab, target = null) {
     assert(!(await visible(page, '#bottom-nav')), 'nav hidden while signed out');
     assert(!(await visible(page, '#account-btn')), 'account button hidden while signed out');
     assert(await page.$('meta[http-equiv="Content-Security-Policy"]') !== null, 'CSP meta present');
+
+    console.log('Install prompt confirms only after the browser reports installation');
+    const installPage = await newPage(browser, makeBackend());
+    await installPage.waitForSelector('#fake-gsi');
+    await installPage.evaluate(() => {
+      const prompt = new Event('beforeinstallprompt', { cancelable: true });
+      prompt.prompt = () => {};
+      Object.defineProperty(prompt, 'userChoice', { value: Promise.resolve({ outcome: 'accepted' }) });
+      window.dispatchEvent(prompt);
+    });
+    await installPage.click('#install-btn');
+    await installPage.waitForTimeout(0);
+    assert(await visible(installPage, '#banner-install'), 'accepted native prompt keeps install card visible while installation is pending');
+    assert((await installPage.textContent('#install-text')).includes('Waiting'),
+      'pending install copy does not claim installation succeeded');
+    await installPage.evaluate(() => window.dispatchEvent(new Event('appinstalled')));
+    assert(await visible(installPage, '#banner-install'), 'confirmed install card stays visible until dismissed');
+    assert((await installPage.textContent('#install-text')).includes('Test Fest') &&
+      (await installPage.textContent('#install-text')).includes('Installed'),
+    'confirmed install names the configured app');
+    assert(await visible(installPage, '#install-dismiss'), 'user can dismiss the install confirmation');
+    await installPage.waitForTimeout(5100);
+    assert(!(await visible(installPage, '#banner-install')), 'install confirmation disappears after five seconds');
+    await installPage.close();
 
     console.log('Token issued for another client is rejected client-side');
     const before = backend.calls;
@@ -634,6 +663,53 @@ async function assertTourStep(page, id, tab, target = null) {
     await groupPage.waitForSelector('#view >> text=Haldi');
     assert(!(await groupPage.isVisible('#view >> text=Hosts only')), 'guest only sees ceremonies for their group and everyone');
     await groupPage.close();
+
+    console.log('Guests see only their audience plus everyone');
+    const audienceBackend = makeBackend();
+    audienceBackend.members[1].groups = ['Group A'];
+    audienceBackend.itinerary.push(
+      { id: '2', day: 'Fri', time: '11:00', title: 'Group A event', location: 'Hall A', status: 'Upcoming', groups: ['Group A'] },
+      { id: '3', day: 'Fri', time: '12:00', title: 'Group B event', location: 'Hall B', status: 'Upcoming', groups: ['Group B'] },
+    );
+    audienceBackend.notifications.push(
+      { id: 'n2', at: new Date().toISOString(), title: 'Group A notice', message: 'For A', eventId: '2', groups: ['Group A'] },
+      { id: 'n3', at: new Date().toISOString(), title: 'Group B notice', message: 'For B', eventId: '3', groups: ['Group B'] },
+    );
+    audienceBackend.ignoreAudienceFilters = true;
+    const audiencePage = await newPage(browser, audienceBackend);
+    await audiencePage.waitForSelector('#fake-gsi');
+    await signIn(audiencePage, 'viewer@gmail.com');
+    await enter(audiencePage);
+    await audiencePage.waitForSelector('#view >> text=Group A event');
+    let audienceText = await audiencePage.textContent('#view');
+    assert(audienceText.includes('Group A event') && audienceText.includes('Welcome') &&
+      !audienceText.includes('Group B event'),
+    'schedule shows matching-group and everyone events, but hides other-group events');
+    await audiencePage.click('[data-tour="skip"]');
+    await audiencePage.waitForSelector('#tour-root', { state: 'detached' });
+    await audiencePage.click('[data-tab="notifications"]');
+    await audiencePage.waitForSelector('#view >> text=Group A notice');
+    audienceText = await audiencePage.textContent('#view');
+    assert(audienceText.includes('Group A notice') && audienceText.includes('Live now: Welcome') &&
+      !audienceText.includes('Group B notice'),
+    'notifications show matching-group and everyone notices, but hide other-group notices');
+    await audiencePage.close();
+
+    console.log('Notification click opens Notices without onboarding overlays');
+    const notificationClickBackend = makeBackend();
+    notificationClickBackend.exposeNoticeMetadataToGuests = true;
+    notificationClickBackend.notifications[0].pushStatus = 'Failed: OneSignal REST error details';
+    const notificationClickPage = await newPage(browser, notificationClickBackend, '?open=notifications');
+    await notificationClickPage.waitForSelector('#fake-gsi');
+    await signIn(notificationClickPage, 'viewer@gmail.com');
+    await notificationClickPage.waitForFunction(() => !document.querySelector('#account-btn')?.classList.contains('hidden'));
+    assert(!(await notificationClickPage.$('#welcome-splash')), 'notification click skips the welcome animation');
+    assert(await notificationClickPage.$eval('#bottom-nav [aria-current="page"]', (button) => button.dataset.tab === 'notifications'),
+      'notification click opens the Notices tab');
+    assert(!(await notificationClickPage.$('#tour-root')), 'notification click does not cover notices with the first-use tour');
+    assert(!(await notificationClickPage.locator('#view').innerText()).includes('OneSignal REST error details'),
+      'guest never sees internal OneSignal push errors');
+    await notificationClickPage.close();
 
     console.log('Tour completion stays busy and can recover from an error');
     const tourRetryBackend = makeBackend();

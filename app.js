@@ -16,6 +16,7 @@
   const BASE_PATH = location.pathname.slice(0, location.pathname.lastIndexOf('/') + 1); // e.g. "/jan-wed-1/"
   const PUSH_INIT_TIMEOUT_MS = 15000;
   const OFFLINE_CACHE_MAX_AGE_MS = 15 * 60 * 1000;
+  let notificationRoutePending = new URLSearchParams(location.search).get('open') === 'notifications';
   // The ID token is a bearer credential: keep it in sessionStorage (tab-scoped, gone on close).
   // GIS auto-select silently re-issues one on the next launch.
   const STORAGE = { CREDENTIAL: 'evt.credential', LAST_USER: 'evt.lastUser', DATA_CACHE: 'evt.data', INSTALL_DISMISSED: 'evt.installDismissed' };
@@ -37,6 +38,24 @@
 
   /** Only Google-hosted avatars are rendered; anything else is dropped. */
   const safePicture = (url) => (/^https:\/\/lh[3-6]\.googleusercontent\.com\//i.test(String(url || '')) ? String(url) : '');
+  const matchesAudience = (itemGroups, memberGroups) => {
+    const targets = Array.isArray(itemGroups)
+      ? itemGroups.filter((group) => typeof group === 'string' && group.trim())
+      : typeof itemGroups === 'string' ? itemGroups.split(',').map((group) => group.trim()).filter(Boolean) : [];
+    if (!targets.length) return true;
+    const assigned = new Set((Array.isArray(memberGroups) ? memberGroups : [])
+      .filter((group) => typeof group === 'string')
+      .map((group) => group.trim().toLowerCase()));
+    return targets.some((group) => assigned.has(group.trim().toLowerCase()));
+  };
+  const guestNotice = (notice) => ({
+    id: notice.id,
+    at: notice.at,
+    title: notice.title,
+    message: notice.message,
+    eventId: notice.eventId,
+    groups: notice.groups,
+  });
   const offlineSchedule = (itinerary) => (Array.isArray(itinerary) ? itinerary : [])
     .filter((event) => !Array.isArray(event.groups) || event.groups.length === 0);
 
@@ -358,19 +377,36 @@
       this.clearOfflineExpiry();
       const savedAt = new Date().toISOString();
       const isAdmin = data.isAdmin === true && data.role === 'Admin';
+      const openNotifications = notificationRoutePending;
+      if (openNotifications) {
+        notificationRoutePending = false;
+        const params = new URLSearchParams(location.search);
+        params.delete('open');
+        const query = params.toString();
+        history.replaceState(null, '', `${location.pathname}${query ? `?${query}` : ''}${location.hash}`);
+      }
       const user = {
         ...Store.state.user,
         name: String(data.name || Store.state.user.name).slice(0, 100),
         picture: safePicture(data.picture) || Store.state.user.picture,
       };
+      const memberGroups = Array.isArray(data.groups) ? data.groups : [];
+      const itinerary = Array.isArray(data.itinerary) ? data.itinerary : [];
+      const notifications = Array.isArray(data.notifications) ? data.notifications : [];
+      const visibleItinerary = isAdmin ? itinerary : itinerary.filter((event) => matchesAudience(event.groups, memberGroups));
+      const visibleNotifications = isAdmin
+        ? notifications
+        : notifications.filter((notice) => matchesAudience(notice.groups, memberGroups))
+          .map(guestNotice);
       // Persist only what offline mode needs: the schedule and a token-free identity.
-      persistOfflineSchedule(user.email, isAdmin ? 'Admin' : GUEST_ROLE, data.itinerary, savedAt);
+      persistOfflineSchedule(user.email, isAdmin ? 'Admin' : GUEST_ROLE, visibleItinerary, savedAt);
       storage.set(STORAGE.LAST_USER, { email: user.email, name: user.name, picture: user.picture });
       Store.set({
         authStatus: 'authed',
         role: isAdmin ? 'Admin' : GUEST_ROLE,
         isAdmin,
-        itinerary: Array.isArray(data.itinerary) ? data.itinerary : [],
+        tab: openNotifications ? 'notifications' : Store.state.tab,
+        itinerary: visibleItinerary,
         logistics: isAdmin && Array.isArray(data.logistics) ? data.logistics : [],
         members: isAdmin && Array.isArray(data.members) ? data.members : [],
         myTravel: Array.isArray(data.myTravel) ? data.myTravel : [],
@@ -378,8 +414,8 @@
         lastSynced: savedAt,
         error: null,
         tourStatus: ['Pending', 'Completed', 'Skipped'].includes(data.tourStatus) ? data.tourStatus : 'Completed',
-        notifications: Array.isArray(data.notifications) ? data.notifications : [],
-        groups: Array.isArray(data.groups) ? data.groups : [],
+        notifications: visibleNotifications,
+        groups: memberGroups,
         knownGroups: Array.isArray(data.knownGroups) ? data.knownGroups : [],
         groupCatalog: Array.isArray(data.groupCatalog) ? data.groupCatalog : [],
         pushId: typeof data.pushId === 'string' ? data.pushId : '',
@@ -389,6 +425,7 @@
       });
       void Push.identify(data.pushId);
       Nudges.onSync();
+      if (openNotifications) return;
       if (announce) Welcome.show(user, { isAdmin, onClose: () => Tour.maybeStart() });
       else Tour.maybeStart();
     },
@@ -614,6 +651,7 @@
 
   const Install = {
     deferred: null,
+    installed: false,
     /** Shareable link that opens the install guide (e.g. sent on WhatsApp). */
     link() { return `${location.origin}${BASE_PATH}?install=1`; },
 
@@ -631,7 +669,14 @@
         $('#install-btn').classList.remove('hidden');
         if (!storage.get(STORAGE.INSTALL_DISMISSED)) this.showBanner();
       });
-      window.addEventListener('appinstalled', () => { this.deferred = null; banner.classList.add('hidden'); });
+      window.addEventListener('appinstalled', () => {
+        this.deferred = null;
+        this.installed = true;
+        $('#install-text').textContent = `Installed on your home screen as “${CONFIG.EVENT_NAME || 'Event'}”.`;
+        $('#install-btn').classList.add('hidden');
+        this.showBanner();
+        setTimeout(() => banner.classList.add('hidden'), 5000);
+      });
 
       $('#install-btn').addEventListener('click', () => { void this.start(); });
       $('#install-dismiss').addEventListener('click', () => {
@@ -667,7 +712,9 @@
       this.deferred = null;
       prompt.prompt();
       const choice = await prompt.userChoice.catch(() => null);
-      if (choice?.outcome === 'accepted') $('#banner-install').classList.add('hidden');
+      if (choice?.outcome === 'accepted' && !this.installed) {
+        $('#install-text').textContent = 'Installation started. Waiting for your device to confirm…';
+      }
     },
 
     guide() {
@@ -1905,7 +1952,14 @@
 
     async clearNotifications() {
       const data = await this.run('notifications:clear', () => Api.post('clearNotifications'), 'Notifications cleared on this account.');
-      if (data) Store.set({ notifications: data.notifications || [] });
+      if (data) {
+        const notices = Array.isArray(data.notifications) ? data.notifications : [];
+        const visible = Store.state.isAdmin
+          ? notices
+          : notices.filter((notice) => matchesAudience(notice.groups, Store.state.groups))
+            .map(guestNotice);
+        Store.set({ notifications: visible });
+      }
     },
 
     async updatePickup(id, status) {
