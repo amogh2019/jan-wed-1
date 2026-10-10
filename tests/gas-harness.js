@@ -55,9 +55,11 @@ function createBackend({ members = [['admin@example.com', 'Admin', 'seed', '']],
   Object.entries(overrides).forEach(([n, rows]) => { if (rows === null) delete sheets[n]; else sheets[n] = makeSheet(n, rows); });
   const cache = new Map();
   const tokens = new Map(); // token -> tokeninfo payload
+  /** @type {Array<{ url: string, opts: { method?: string, headers: Record<string, string>, payload?: string } }>} */
   const fetches = [];
   const properties = { GOOGLE_CLIENT_ID: CLIENT_ID, ONESIGNAL_APP_ID: 'os-app', ONESIGNAL_REST_API_KEY: 'os-key', ...props };
 
+  /** @type {Record<string, any>} Apps Script globals plus the functions Code.gs defines. */
   const sandbox = {
     console,
     SpreadsheetApp: {
@@ -79,7 +81,7 @@ function createBackend({ members = [['admin@example.com', 'Admin', 'seed', '']],
     },
     Utilities: {
       DigestAlgorithm: { SHA_256: 'sha256' },
-      computeDigest: (_alg, text) => Array.from(crypto.createHash('sha256').update(String(text)).digest()).map((b) => (b > 127 ? b - 256 : b)),
+      computeDigest: (_alg, text) => [...crypto.createHash('sha256').update(String(text)).digest()].map((b) => (b > 127 ? b - 256 : b)),
       base64DecodeWebSafe: (s) => Buffer.from(s, 'base64url'),
       newBlob: (bytes) => ({ getDataAsString: () => Buffer.from(bytes).toString('utf8') }),
       formatDate: (d) => new Date(d).toISOString(),
@@ -98,7 +100,7 @@ function createBackend({ members = [['admin@example.com', 'Admin', 'seed', '']],
   };
   vm.createContext(sandbox);
   // Test-only: loads our own backend/Code.gs into an isolated sandbox (never user input).
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'backend', 'Code.gs'), 'utf8'), sandbox, { filename: 'Code.gs' }); // eslint-disable-line sonarjs/code-eval -- NOSONAR
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'backend', 'Code.gs'), 'utf8'), sandbox, 'Code.gs'); // eslint-disable-line sonarjs/code-eval -- NOSONAR
 
   const tokenFor = (email, opts) => {
     const { token, claims } = makeToken(email, opts);

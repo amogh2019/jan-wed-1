@@ -23,10 +23,11 @@ An **invite-only, festive PWA** for a 3-day event, hosted for free on GitHub Pag
 | `src/styles.css` → `styles.css` | Tailwind source → built CSS (`npm run build:css`). Commit both. |
 | `tailwind.config.js` | Festive palette (marigold, maroon/sindoor, haldi), fonts. |
 | `fonts/` | Self-hosted Poppins + Yatra One (incl. Devanagari). |
-| `icons/` | PWA icons + `mandala.svg` decoration. |
+| `icons/` | PWA icons, `icon-80.png` (header logo, 2x), `mandala.svg` decoration. |
 | `manifest.json` | PWA install metadata. |
 | `service-worker.js` | Shell cache (`CACHE_VERSION`), network-first for API. |
 | `backend/Code.gs` | Entire backend. Paste into the Sheet's Apps Script editor. |
+| `types/globals.d.ts` | Editor-only type hints (GSI `google`, `Guest` rows, form fields) for IDE inspections. Not loaded by the browser. |
 | `tests/` | `gas-harness.js` (runs Code.gs in Node with fake sheets), `backend.test.js`, `e2e.smoke.js` (Playwright). |
 
 ## 3. Google Sheet data model
@@ -112,7 +113,7 @@ Checklist:
 - Deploy the web app as *Execute as: Me*, *Access: Anyone*.
 - Before committing, run: `grep -rn "REST_API_KEY\|private_key\|secret" --exclude-dir=node_modules .`
 
-**CSP (in `index.html`).** No wildcard hosts: Google profile photos are limited to `lh3`–`lh6.googleusercontent.com` (also enforced by `safePicture`), and OneSignal to `onesignal.com`/`api.onesignal.com`. `script-src` never allows `'unsafe-inline'`. `style-src` keeps `'unsafe-inline'` deliberately: the Google and OneSignal SDKs inject inline styles, and the progress bars use `style="width:%"`. Styles cannot run script and all user data is escaped, so this is an accepted Sonar hotspot. If you add a new third-party host, add it explicitly. The service worker only accepts `postMessage` from its own origin.
+**CSP (in `index.html`).** No wildcard hosts and no `'unsafe-inline'` anywhere. Google profile photos are limited to `lh3`–`lh6.googleusercontent.com` (also enforced by `safePicture`), and OneSignal to `onesignal.com`/`api.onesignal.com`. Never write `style="…"` in markup: set dynamic styles through the CSSOM (`el.style.x = …`), e.g. progress bars use `data-progress` + `applyProgressWidths()`. The e2e test fails on any CSP violation. If a real OneSignal/Google prompt ever renders unstyled in production, check the browser console for a `style-src` violation before loosening the policy. The service worker only accepts `postMessage` from its own origin.
 
 ## 7. Run, test, deploy
 
@@ -145,3 +146,4 @@ Deploy:
 - **v1.3** Ganesh Vandana welcome splash, warm nudges, one-time guided tour tracked in `Members.TourStatus`; non-destructive `setup()` with column append and blank-only backfill; this guide.
 - **v1.3.1** SonarJS static-analysis cleanup (0 issues): split `doPost` into `authenticate_` / `resolveAction_` / `runLocked_`, split `render()` and `loadSession()` into helpers, removed nested ternaries/templates, crypto-based randomness for petals, linear-time base-path parsing, explicit NaN-safe token expiry check. No behaviour change.
 - **v1.3.2** Second Sonar/unicorn pass: `node:` imports, `replaceAll`/`codePointAt`/`dataset`/`Set.has`, braces on one-line loops in tests, locale-aware sort; CSP wildcards removed; service-worker message origin check; offline banner is an `<output>` element.
+- **v1.3.3** IDE-inspection cleanup (0 IntelliJ/Sonar issues): removed `'unsafe-inline'` from `style-src` (progress bars via CSSOM), explicit `void` on fire-and-forget promises, `types/globals.d.ts` + `@types/node` dev dependency for type hints, `icon-80.png` header logo, Tailwind at-rule suppressions, e2e uses `@playwright/test` (the declared dependency).

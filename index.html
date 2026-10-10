@@ -39,6 +39,8 @@
 
   <!-- Google Identity Services & OneSignal Web SDK v16 -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <!-- OneSignal must be loaded from its CDN (not self-hostable). -->
+  <!--suppress JSUnresolvedLibraryURL -->
   <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
 </head>
 
@@ -49,6 +51,8 @@
   <header class="safe-top sticky top-0 z-30 text-white">
     <div class="header-silk shadow-lg">
       <div class="max-w-2xl mx-auto px-4 pt-3 pb-2.5 flex items-center gap-3">
+        <!-- 80px source shown at 40px for sharp 2x displays. -->
+        <!--suppress CheckImageSize -->
         <img src="icons/icon-80.png" alt="" width="40" height="40" class="w-10 h-10 rounded-xl ring-2 ring-haldi-300/60 shadow" />
         <div class="flex-1 min-w-0">
           <p id="app-blessing" class="hidden font-display text-[11px] leading-none text-haldi-200/90 truncate"></p>

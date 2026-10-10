@@ -31,21 +31,21 @@
 
 /*noinspection CssInvalidAtRule*/
 @layer components {
-  .card { @apply rounded-2xl bg-white/95 border border-haldi-200/70 shadow-card; }
-  .btn { @apply inline-flex items-center justify-center gap-2 rounded-xl font-semibold text-sm px-4 py-2.5 min-h-[44px] transition active:scale-[.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100; }
-  .btn-primary { @apply btn bg-kumkum-700 text-white hover:bg-kumkum-800 shadow-lift; }
-  .btn-live { @apply btn text-white shadow-lift bg-gradient-to-r from-marigold-600 via-kumkum-600 to-kumkum-700 hover:brightness-110; }
-  .btn-gold { @apply btn bg-haldi-100 text-kumkum-800 border border-haldi-300 hover:bg-haldi-200; }
-  .btn-ghost { @apply btn bg-ivory-200/70 text-ink-700 hover:bg-ivory-300; }
-  .btn-whatsapp { @apply btn bg-mehndi-50 text-mehndi-700 border border-mehndi-100 hover:bg-mehndi-100; }
-  .btn-danger { @apply btn bg-kumkum-50 text-kumkum-700 border border-kumkum-200 hover:bg-kumkum-100; }
-  .btn-sm { @apply min-h-[36px] px-3 py-1.5 text-xs rounded-lg; }
-  .input { @apply w-full rounded-xl border border-haldi-300/70 bg-white px-4 py-2.5 text-sm text-ink-900 placeholder:text-ink-400 focus:outline-none focus:ring-2 focus:ring-marigold-400 focus:border-marigold-400; }
-  .chip { @apply inline-flex items-center gap-1 whitespace-nowrap rounded-full px-3.5 py-1.5 text-xs font-semibold min-h-[34px] transition; }
-  .chip-on { @apply chip bg-kumkum-700 text-white shadow-sm; }
-  .chip-off { @apply chip bg-white text-ink-600 border border-haldi-200 hover:border-haldi-400; }
-  .eyebrow { @apply text-[11px] font-semibold uppercase tracking-[.14em] text-marigold-700; }
-  .section-title { @apply font-display text-2xl text-kumkum-800 leading-tight; }
+  .card { /*noinspection CssInvalidAtRule*/ @apply rounded-2xl bg-white/95 border border-haldi-200/70 shadow-card; }
+  .btn { /*noinspection CssInvalidAtRule*/ @apply inline-flex items-center justify-center gap-2 rounded-xl font-semibold text-sm px-4 py-2.5 min-h-[44px] transition active:scale-[.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100; }
+  .btn-primary { /*noinspection CssInvalidAtRule*/ @apply btn bg-kumkum-700 text-white hover:bg-kumkum-800 shadow-lift; }
+  .btn-live { /*noinspection CssInvalidAtRule*/ @apply btn text-white shadow-lift bg-gradient-to-r from-marigold-600 via-kumkum-600 to-kumkum-700 hover:brightness-110; }
+  .btn-gold { /*noinspection CssInvalidAtRule*/ @apply btn bg-haldi-100 text-kumkum-800 border border-haldi-300 hover:bg-haldi-200; }
+  .btn-ghost { /*noinspection CssInvalidAtRule*/ @apply btn bg-ivory-200/70 text-ink-700 hover:bg-ivory-300; }
+  .btn-whatsapp { /*noinspection CssInvalidAtRule*/ @apply btn bg-mehndi-50 text-mehndi-700 border border-mehndi-100 hover:bg-mehndi-100; }
+  .btn-danger { /*noinspection CssInvalidAtRule*/ @apply btn bg-kumkum-50 text-kumkum-700 border border-kumkum-200 hover:bg-kumkum-100; }
+  .btn-sm { /*noinspection CssInvalidAtRule*/ @apply min-h-[36px] px-3 py-1.5 text-xs rounded-lg; }
+  .input { /*noinspection CssInvalidAtRule*/ @apply w-full rounded-xl border border-haldi-300/70 bg-white px-4 py-2.5 text-sm text-ink-900 placeholder:text-ink-400 focus:outline-none focus:ring-2 focus:ring-marigold-400 focus:border-marigold-400; }
+  .chip { /*noinspection CssInvalidAtRule*/ @apply inline-flex items-center gap-1 whitespace-nowrap rounded-full px-3.5 py-1.5 text-xs font-semibold min-h-[34px] transition; }
+  .chip-on { /*noinspection CssInvalidAtRule*/ @apply chip bg-kumkum-700 text-white shadow-sm; }
+  .chip-off { /*noinspection CssInvalidAtRule*/ @apply chip bg-white text-ink-600 border border-haldi-200 hover:border-haldi-400; }
+  .eyebrow { /*noinspection CssInvalidAtRule*/ @apply text-[11px] font-semibold uppercase tracking-[.14em] text-marigold-700; }
+  .section-title { /*noinspection CssInvalidAtRule*/ @apply font-display text-2xl text-kumkum-800 leading-tight; }
 }
 
 @layer utilities {

@@ -146,7 +146,7 @@
       }
       let body;
       try { body = await res.json(); } catch { throw new ApiError('BAD_RESPONSE', `Unexpected server response (HTTP ${res.status}).`); }
-      if (!body || body.ok !== true) throw new ApiError(String(body?.code || 'SERVER_ERROR'), String(body?.error || 'Request failed.').slice(0, 300));
+      if (body?.ok !== true) throw new ApiError(String(body?.code || 'SERVER_ERROR'), String(body?.error || 'Request failed.').slice(0, 300));
       return body.data;
     },
 

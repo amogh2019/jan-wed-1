@@ -1,6 +1,6 @@
 {
   "name": "event-companion-pwa",
-  "version": "1.3.0",
+  "version": "1.3.3",
   "private": true,
   "description": "Invite-only event PWA on GitHub Pages with a Google Sheets / Apps Script backend.",
   "scripts": {

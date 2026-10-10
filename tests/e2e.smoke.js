@@ -7,14 +7,20 @@ const path = require('node:path');
 const ROOT = process.argv[2] || path.join(__dirname, '..');
 const PORT = 8765;
 const types = { '.css': 'text/css', '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json', '.png': 'image/png' };
-const server = http.createServer((req, res) => {
+/**
+ * Static file server for the app under test.
+ * @param {http.IncomingMessage} req
+ * @param {http.ServerResponse} res
+ */
+function serveStatic(req, res) {
   const p = path.join(ROOT, decodeURIComponent(req.url.split('?')[0]).replace(/\/$/, '/index.html'));
   fs.readFile(p, (err, buf) => {
     if (err) { res.writeHead(404); return res.end(); }
     res.writeHead(200, { 'Content-Type': types[path.extname(p)] || 'application/octet-stream' });
     res.end(buf);
   });
-}).listen(PORT);
+}
+const server = http.createServer(serveStatic).listen(PORT);
 
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
 const jwt = (email, name) => `h.${b64({ email, name, aud: 'x.apps.googleusercontent.com', email_verified: true, picture: '', exp: Math.floor(Date.now() / 1000) + 3600 })}.s`;
@@ -175,8 +181,8 @@ const visible = (page, sel) => page.$eval(sel, (el) => !el.classList.contains('h
     await page.click('[data-tab="members"]');
     await page.waitForSelector('text=Members & access');
     assert(await page.isVisible('text=tour skipped'), 'admins can see who skipped the tour');
-    assert(await page.$eval('select[data-email="admin@gmail.com"]', (e) => e.disabled), 'own role select disabled');
-    assert(await page.$eval('button[data-email="admin@gmail.com"]', (e) => e.disabled), 'own remove disabled');
+    assert(await page.isDisabled('select[data-email="admin@gmail.com"]'), 'own role select disabled');
+    assert(await page.isDisabled('button[data-email="admin@gmail.com"]'), 'own remove disabled');
 
     await page.fill('#new-member-email', 'New.Guest@Gmail.com');
     await page.selectOption('form[data-action="add-member"] select[name="role"]', 'Viewer');
