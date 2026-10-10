@@ -1628,9 +1628,9 @@
           return `
           <li class="flex items-center gap-3 p-3">
             <div class="w-9 h-9 shrink-0 rounded-full ${m.role === 'Admin' ? 'bg-kumkum-100 text-kumkum-700' : 'bg-haldi-100 text-haldi-800'} grid place-items-center font-bold">${escapeHtml(m.email[0]?.toUpperCase() || '?')}</div>
+            <p class="text-sm font-medium text-ink-900 truncate">${escapeHtml(m.email)} ${self ? '<span class="ml-1 rounded-full bg-kumkum-600 text-ivory-50 text-[10px] px-2 py-0.5">You</span>' : ''}</p>
+            <p class="text-xs text-ink-400 truncate">Added by ${escapeHtml(m.addedBy || '—')}${addedLine(m)} ${tourChip(m.tourStatus)}</p>
             <div class="flex-1 min-w-0">
-              <p class="text-sm font-medium text-ink-900 truncate">${escapeHtml(m.email)} ${self ? '<span class="ml-1 rounded-full bg-kumkum-600 text-ivory-50 text-[10px] px-2 py-0.5">You</span>' : ''}</p>
-              <p class="text-xs text-ink-400 truncate">Added by ${escapeHtml(m.addedBy || '—')}${addedLine(m)} ${tourChip(m.tourStatus)}</p>
               <label class="block mt-2 text-[11px] text-ink-500">Groups
                 ${groupPicker(s.groupCatalog, s.memberGroupsDrafts[m.email] ?? (m.groups || []), 'member-groups', { email: m.email }, groupsBusy)}
               </label>
