@@ -539,7 +539,7 @@
         console.warn('OneSignal identity setup failed', err);
       }).then(async () => {
         if (this.pendingIdentity !== externalId || this.loggedInIdentity === externalId) return;
-        await sdk.login(externalId);
+        await sdk.login(externalId).catch((e)=>{ if(e?.code==='invalid_aliases') return; throw e; });
         if (this.pendingIdentity === externalId) this.loggedInIdentity = externalId;
       }).catch((err) => {
         console.warn('OneSignal identity setup failed', err);
