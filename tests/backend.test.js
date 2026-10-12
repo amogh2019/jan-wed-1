@@ -767,16 +767,74 @@ test('broadcastNotification: only admins may send and failed push remains in his
   const out = b.call(ADMIN, 'broadcastNotification', payload);
   assert.equal(out.ok, true);
   assert.equal(out.data.push.ok, false);
-  assert.match(out.data.push.error, /not configured/i);
+  assert.equal(out.data.push.error, undefined, 'provider details are not returned to the app');
   const adminNotice = b.call(ADMIN, 'session').data.notifications[0];
   const guestNotice = b.call(VIEWER, 'session').data.notifications[0];
-  assert.match(adminNotice.pushStatus, /^Failed:/);
+  assert.equal(adminNotice.pushStatus, 'Failed');
   assert.equal(guestNotice.pushStatus, undefined);
   assert.equal(guestNotice.sentBy, undefined);
   assert.equal(guestNotice.title, 'Important');
   assert.equal(b.audit().at(-1)[1], ADMIN);
   assert.equal(b.audit().at(-1)[2], 'Event');
   assert.match(b.audit().at(-1)[3], /push FAILED/);
+  assert.doesNotMatch(b.audit().at(-1)[3], /not configured/i);
+});
+
+test('broadcastNotification: deduplicates member aliases and hides OneSignal diagnostics from app data', () => {
+  const b = grouped();
+  registerGroups(b, ['Family']);
+  const groupsCol = b.sheets.Members.data[0].indexOf('Groups');
+  b.sheets.Members.data.push([GUEST_A.toUpperCase(), 'Atithi', ADMIN, '', 'Family']);
+  b.sheets.Members.data[2][groupsCol] = 'Family';
+  b.sheets.Members.data[3][groupsCol] = 'Family';
+  const expectedIds = [
+    b.call(ADMIN, 'session').data.pushId,
+    b.call(GUEST_A, 'session').data.pushId,
+    b.call(GUEST_B, 'session').data.pushId,
+  ];
+  b.sandbox.UrlFetchApp.fetch = (url, opts) => {
+    b.fetches.push({ url, opts });
+    if (!url.includes('api.onesignal.com')) return { getResponseCode: () => 200, getContentText: () => '{}' };
+    return {
+      getResponseCode: () => 400,
+      getContentText: () => JSON.stringify({ errors: { invalid_aliases: { external_id: [expectedIds[1], expectedIds[1]] } } }),
+    };
+  };
+
+  const out = b.call(ADMIN, 'broadcastNotification', {
+    title: 'Family update',
+    body: 'Please gather by the entrance.',
+    groups: [],
+  });
+  const payload = JSON.parse(b.fetches.filter((f) => f.url.includes('api.onesignal.com')).at(-1).opts.payload);
+  const serializedData = JSON.stringify(out.data);
+  const notification = b.sheets.Notifications.data.at(-1);
+  const audit = b.audit().at(-1);
+
+  assert.deepEqual(payload.include_aliases.external_id, expectedIds);
+  assert.equal(out.data.push.ok, false);
+  assert.equal(out.data.push.error, undefined);
+  assert.equal(notification[6], 'Failed');
+  assert.doesNotMatch(notification[6], /invalid_aliases|m_[a-f0-9]{40}/);
+  assert.doesNotMatch(audit[3], /invalid_aliases|m_[a-f0-9]{40}/);
+  assert.doesNotMatch(serializedData, /invalid_aliases|m_[a-f0-9]{40}/);
+});
+
+test('testPush logs a generic status without OneSignal diagnostics', () => {
+  const b = createBackend();
+  const logs = [];
+  b.sandbox.console = { log: (message) => logs.push(message) };
+  b.sandbox.UrlFetchApp.fetch = (url, opts) => {
+    b.fetches.push({ url, opts });
+    return {
+      getResponseCode: () => 400,
+      getContentText: () => '{"errors":{"invalid_aliases":{"external_id":["private-alias"]}}}',
+    };
+  };
+
+  b.sandbox.testPush();
+
+  assert.deepEqual(logs, ['{"attempted":true,"ok":false}']);
 });
 
 test('push: everyone-events go to current member IDs; labelled events only to that group\'s opaque IDs', () => {
@@ -810,9 +868,9 @@ test('push: a labelled event with nobody in the group is not sent but still logg
   const sent = b.fetches.length;
   const out = b.call(ADMIN, 'updateEvent', { eventId: '1', status: 'Live', notify: true });
   assert.equal(out.data.push.ok, false);
-  assert.match(out.data.push.error, /No members are in group Nobody/);
+  assert.equal(out.data.push.error, undefined);
   assert.equal(b.fetches.length, sent, 'no OneSignal call');
-  assert.match(b.sheets.Notifications.data.at(-1)[6], /^Failed:/);
+  assert.equal(b.sheets.Notifications.data.at(-1)[6], 'Failed');
 });
 
 test('push click URL opens the app notification center', () => {
@@ -822,17 +880,21 @@ test('push click URL opens the app notification center', () => {
   assert.equal(push.url, 'https://example.github.io/event/?open=notifications');
 });
 
-test('notification push errors are visible to admins only', () => {
+test('notification push failure status is shared without provider diagnostics', () => {
   const b = createBackend({
     members: [[ADMIN, 'Admin', 'seed', ''], [VIEWER, 'Atithi', ADMIN, '']],
     props: { ONESIGNAL_APP_ID: '' },
   });
-  b.call(ADMIN, 'updateEvent', { eventId: '1', status: 'Live', notify: true });
+  const result = b.call(ADMIN, 'updateEvent', { eventId: '1', status: 'Live', notify: true });
   const adminNotice = b.call(ADMIN, 'session').data.notifications[0];
   const guestNotice = b.call(VIEWER, 'session').data.notifications[0];
-  assert.match(adminNotice.pushStatus, /^Failed:/);
+  assert.equal(result.data.push.error, undefined);
+  assert.equal(adminNotice.pushStatus, 'Failed');
   assert.equal(guestNotice.pushStatus, undefined);
   assert.equal(guestNotice.sentBy, undefined);
+  assert.match(b.audit().at(-1)[3], /push FAILED/);
+  assert.doesNotMatch(b.audit().at(-1)[3], /not configured/i);
+  assert.equal(b.call(ADMIN, 'updateEvent', { eventId: '2', status: 'Live', notify: true }).data.push.error, undefined);
 });
 
 test('notifications: Live announcements are logged, filtered by group, and Clear hides them per member', () => {

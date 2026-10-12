@@ -1947,7 +1947,7 @@
       if (Store.state.user?.email) persistOfflineSchedule(Store.state.user.email, Store.state.role, data.itinerary);
       if (status === 'Live') Festive.petals();
       if (data.push?.attempted) {
-        Toast.show(data.push.ok ? `"${data.event.title}" is Live — push sent 🔔` : `Status updated, but push failed: ${data.push.error}`, data.push.ok ? 'success' : 'error', 5500);
+        Toast.show(data.push.ok ? `"${data.event.title}" is Live — push sent 🔔` : 'Status updated, but push delivery failed.', data.push.ok ? 'success' : 'error', 5500);
       } else {
         Toast.show(`"${data.event.title}" set to ${status}`, 'success');
       }
@@ -1978,7 +1978,7 @@
       const push = data.push;
       let status = push.ok
         ? 'Broadcast sent.'
-        : `Broadcast recorded, but push failed: ${push.error || 'delivery status unavailable.'}`;
+        : 'Broadcast recorded, but push delivery failed.';
       if (shareToWhatsApp) {
         if (popup && !popup.closed) popup.location.href = WhatsApp.buildUrl(`*${title}*\n\n${body}`);
         else status += ' The browser blocked the WhatsApp window.';

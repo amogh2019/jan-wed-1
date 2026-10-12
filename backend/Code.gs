@@ -304,13 +304,13 @@ var ACTIONS_ = {
     var details = 'Changed Event ' + eventId + ' ("' + event.title + '") from ' +
       (previous || 'blank') + ' to ' + status;
     if (push.attempted) {
-      details += (push.ok ? ' — push sent' : ' — push FAILED: ' + push.error) + ' to ' + audienceLabel_(event.groups);
+      details += (push.ok ? ' — push sent' : ' — push FAILED') + ' to ' + audienceLabel_(event.groups);
       // The in-app Notifications list shows the announcement even if the push itself failed.
       logNotification_(push.message, event, user.email, push);
     }
     writeAudit_(user.email, AUDIT_CATEGORY.EVENT, details, req.timestamp);
 
-    return { event: event, push: push, itinerary: refreshItineraryCache_() };
+    return { event: event, push: publicPushResult_(push), itinerary: refreshItineraryCache_() };
   },
 
   broadcastNotification: function (payload, user, req) {
@@ -322,11 +322,11 @@ var ACTIONS_ = {
     var push = sendPush_(message, groups, '');
 
     logNotification_(message, { id: '', groups: groups }, user.email, push);
-    var result = push.ok ? 'push sent' : 'push FAILED: ' + push.error;
+    var result = push.ok ? 'push sent' : 'push FAILED';
     writeAudit_(user.email, AUDIT_CATEGORY.EVENT,
       'Broadcast "' + title + '" to ' + audienceLabel_(groups) + ' — ' + result, req.timestamp);
 
-    return { push: push, notifications: notificationsFor_(user, true) };
+    return { push: publicPushResult_(push), notifications: notificationsFor_(user, true) };
   },
 
   updatePickup: function (payload, user, req) {
@@ -973,9 +973,20 @@ function pushIdFor_(email) {
 }
 
 function groupPushIds_(groups) {
+  var seen = {};
   return readMembers_()
     .filter(function (m) { return inGroups_(groups, m.groups); })
-    .map(function (m) { return pushIdFor_(m.email); });
+    .map(function (m) { return pushIdFor_(m.email); })
+    .filter(function (id) {
+      if (seen[id]) return false;
+      seen[id] = true;
+      return true;
+    });
+}
+
+/** Keep provider diagnostics out of app responses and execution logs. */
+function publicPushResult_(push) {
+  return { attempted: push.attempted, ok: push.ok === true };
 }
 
 /* ----------------------------------------------------------------------------
@@ -1000,7 +1011,7 @@ function logNotification_(message, event, senderEmail, push) {
     EventID: event.id || '',
     Groups: (event.groups || []).join(', '),
     SentBy: normalizeEmail_(senderEmail),
-    PushStatus: push.ok ? 'Sent' : ('Failed: ' + push.error).slice(0, 300),
+    PushStatus: push.ok ? 'Sent' : 'Failed',
   });
   return refreshNotificationsCache_();
 }
@@ -1568,5 +1579,5 @@ function migrateViewerToAtithi() {
 /** Sends a test push to current Members to validate OneSignal identity/subscription configuration. */
 function testPush() {
   var result = sendLivePush_({ title: 'Test notification', location: 'Main Hall', time: 'now' });
-  console.log(JSON.stringify(result));
+  console.log(JSON.stringify(publicPushResult_(result)));
 }

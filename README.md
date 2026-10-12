@@ -24,7 +24,7 @@ Every admin action sends the admin's email and a timestamp. `Code.gs` writes the
 | `Logistics` | ID, Name, Members, Contact, ArrivalDateTime, DepartureDateTime, Mode, PickupStatus (`Pending`/`Picked Up`), Email (optional, the guest's Google email), DropStatus (optional, `Pending`/`Dropped Off`) |
 | `Members` | Email, Role (`Admin`/`Atithi`), AddedBy, AddedDate, TourStatus (`Pending`/`Completed`/`Skipped`), TourCompletedAt, Groups (comma-separated labels), NotificationsClearedAt |
 | `AuditLog` | Timestamp, UserEmail, ActionCategory, Details |
-| `Notifications` | Timestamp, Title, Message, EventID, Groups, SentBy, PushStatus (Event Control and standalone Broadcast announcements) |
+| `Notifications` | Timestamp, Title, Message, EventID, Groups, SentBy, PushStatus (`Sent`/`Failed`; Event Control and standalone Broadcast announcements) |
 | `Groups` | Label, Status (`Active`/`Archived`; created by `setup()`) |
 
 Columns are matched by header name, so you can reorder them. An empty or unknown Role, or the old name `Viewer`, is treated as `Atithi`. Admins add itinerary and pick-up rows from the app, so they don't need access to the Sheet itself (the script runs as you).

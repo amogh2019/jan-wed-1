@@ -65,7 +65,7 @@ function makeBackend() {
   const email = (tok) => JSON.parse(Buffer.from(tok.split('.')[1], 'base64url').toString()).email;
   return {
     audit, members, itinerary, logistics, notifications, groupCatalog, calls: 0, tourCalls: [], broadcastRequests: [],
-    expireNext: false, failNextAction: null, failBroadcastPush: false,
+    expireNext: false, failNextAction: null, failBroadcastPush: false, failEventPush: false,
     ignoreAudienceFilters: false,
     exposeNoticeMetadataToGuests: false,
     handle(body) {
@@ -147,11 +147,14 @@ function makeBackend() {
       if (body.action === 'updateEvent') {
         const event = itinerary.find((x) => x.id === p.eventId);
         event.status = p.status;
+        const attempted = p.status === 'Live' && p.notify !== false;
+        const pushOk = !attempted || !this.failEventPush;
         if (p.status === 'Live' && p.notify !== false) notifications.unshift({
           id: `n${notifications.length + 1}`, at: new Date().toISOString(), title: `Live now: ${event.title}`,
-          message: `${event.title} is live`, eventId: event.id, groups: event.groups || [], sentBy: me, pushStatus: 'Sent',
+          message: `${event.title} is live`, eventId: event.id, groups: event.groups || [], sentBy: me,
+          pushStatus: pushOk ? 'Sent' : 'Failed: Simulated OneSignal failure.',
         });
-        return { ok: true, data: { event, push: { attempted: p.status === 'Live' && p.notify !== false, ok: true }, itinerary } };
+        return { ok: true, data: { event, push: { attempted, ok: pushOk, error: pushOk ? undefined : 'Simulated OneSignal failure.' }, itinerary } };
       }
       if (body.action === 'broadcastNotification') {
         this.broadcastRequests.push({ email: me, timestamp: body.timestamp, ...p });
@@ -375,7 +378,10 @@ async function assertTourStep(page, id, tab, target = null) {
     const whatsappPopup = await whatsappPopupPromise;
     assert(whatsappPopup.url() === 'about:blank',
       'WhatsApp tab opens synchronously before the broadcast request completes');
-    await broadcastPage.waitForSelector('#toast-root >> text=push failed');
+    await broadcastPage.waitForSelector('#toast-root >> text=push delivery failed');
+    const pushFailureToast = await broadcastPage.locator('#toast-root').textContent();
+    assert(pushFailureToast.includes('delivery failed') && !pushFailureToast.includes('Simulated OneSignal failure'),
+      'push failure toast gives a short status without exposing provider diagnostics');
     await whatsappPopup.waitForURL(/api\.whatsapp\.com\/send/, { waitUntil: 'commit' });
     const whatsappText = new URL(whatsappPopup.url()).searchParams.get('text');
     assert(whatsappText === '*Bring umbrellas*\n\nMeet at the covered entrance.' &&
@@ -470,7 +476,7 @@ async function assertTourStep(page, id, tab, target = null) {
       (await installPage.textContent('#install-text')).includes('Installed'),
     'confirmed install names the configured app');
     assert(await visible(installPage, '#install-dismiss'), 'user can dismiss the install confirmation');
-    await installPage.waitForTimeout(5100);
+    await installPage.waitForFunction(() => document.querySelector('#banner-install')?.classList.contains('hidden'));
     assert(!(await visible(installPage, '#banner-install')), 'install confirmation disappears after five seconds');
     await installPage.close();
 
@@ -704,6 +710,16 @@ async function assertTourStep(page, id, tab, target = null) {
     await page.click('#modal-root [data-modal="confirm"]');
     await page.waitForSelector('#view >> text=Hosts only');
     backend.delayMs = 700;
+    backend.failEventPush = true;
+    await page.selectOption('select[data-action="set-status"][data-id="1"]', 'Live');
+    const eventWhatsAppPopupPromise = page.waitForEvent('popup');
+    await page.click('#modal-root [data-modal="confirm"]');
+    const eventWhatsAppPopup = await eventWhatsAppPopupPromise;
+    await page.waitForSelector('#toast-root >> text=push delivery failed');
+    const eventPushFailureToast = await page.locator('#toast-root').textContent();
+    assert(!eventPushFailureToast.includes('Simulated OneSignal failure.'),
+      'event push failure toast does not expose provider diagnostics');
+    await eventWhatsAppPopup.close();
     await page.selectOption('select[data-action="set-status"][data-id="1"]', 'Completed');
     await page.waitForSelector('[role="status"][aria-label="Updating event status"] .spinner');
     assert(await page.isDisabled('select[data-action="set-status"][data-id="1"]'), 'event status select disables while pending');
