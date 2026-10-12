@@ -1702,7 +1702,7 @@
               <h3 class="font-semibold text-kumkum-800">${escapeHtml(n.title)}</h3>
               <p class="mt-1 text-sm text-ink-700">${escapeHtml(n.message)}</p>
               <p class="mt-2 text-xs text-ink-400">${escapeHtml(formatDateTime(n.at))}${n.groups?.length ? ` · ${escapeHtml(n.groups.join(', '))}` : ' · Everyone'}</p>
-              ${s.isAdmin ? `<p class="mt-1 text-[11px] text-ink-500">By ${escapeHtml(n.sentBy || '—')} · ${escapeHtml(n.pushStatus || 'Not sent')}</p>` : ''}
+              ${s.isAdmin ? `<p class="mt-1 text-[11px] text-ink-500">By ${escapeHtml(n.sentBy || '—')} · ${escapeHtml(n.pushStatus && n.pushStatus.startsWith('Failed')  ? 'Failed' : (n.pushStatus || 'Not sent'))}</p>` : ''}
             </div>
             <span class="text-2xl" aria-hidden="true">🔔</span>
           </div>
