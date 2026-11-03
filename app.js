@@ -1682,7 +1682,7 @@
   Views.members = (s) => {
     const me = s.user?.email;
     const q = s.memberSearch.trim().toLowerCase();
-    const list = s.members.filter((m) => !q || m.email.includes(q) || m.role.toLowerCase() === q || (m.groups || []).some((g) => g.toLowerCase().includes(q)));
+    const list = s.members.filter((m) => !q || m.email.includes(q));
     const adminCount = s.members.filter((m) => m.role === 'Admin').length;
     const roleOptions = (current) => ROLES.map((r) => `<option value="${r}" ${r === current ? 'selected' : ''}>${r}</option>`).join('');
     const stat = (n, label) => `<div class="card py-2"><p class="font-display text-xl text-kumkum-700">${n}</p><p class="text-[11px] text-ink-500">${label}</p></div>`;
@@ -1787,7 +1787,7 @@
         </div>
         <div class="relative mt-3">
           <span class="pointer-events-none absolute inset-y-0 left-3 grid place-items-center text-ink-400" aria-hidden="true">⌕</span>
-          <input type="search" data-action="member-search" value="${escapeHtml(s.memberSearch)}" placeholder="Name, role, or group…" aria-label="Search members" class="input min-h-[48px] pl-10 ${q ? 'pr-20' : ''}" />
+          <input type="search" data-action="member-search" value="${escapeHtml(s.memberSearch)}" placeholder="Search by email…" aria-label="Search members by email" class="input min-h-[48px] pl-10 ${q ? 'pr-20' : ''}" />
           ${q ? '<button type="button" data-action="member-search-clear" class="absolute inset-y-1 right-1 rounded-lg px-3 text-xs font-semibold text-kumkum-700 hover:bg-kumkum-50">Clear</button>' : ''}
         </div>
       </section>

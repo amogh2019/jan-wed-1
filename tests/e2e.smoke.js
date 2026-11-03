@@ -713,9 +713,12 @@ async function assertTourStep(page, id, tab, target = null) {
       'member search has a visible label');
     assert((await page.textContent('[data-member-search-count]')).includes('2 of 2'),
       'member search initially reports every member');
-    await page.fill('[data-action="member-search"]', 'viewer');
+    await page.fill('[data-action="member-search"]', 'atithi');
+    assert((await page.textContent('[data-member-search-count]')).includes('0 of 2'),
+      'member search ignores role text');
+    await page.fill('[data-action="member-search"]', 'min@');
     assert((await page.textContent('[data-member-search-count]')).includes('1 of 2'),
-      'member search reports the filtered result count');
+      'member search partially matches email addresses');
     assert(await page.isVisible('[data-action="member-search-clear"]'), 'a search query exposes a clear action');
     await page.click('[data-action="member-search-clear"]');
     assert(await page.inputValue('[data-action="member-search"]') === '', 'Clear resets member search');
