@@ -197,19 +197,37 @@ const assert = (cond, msg) => {
   console.log(`  ✓ ${msg}`);
 };
 
-async function newPage(browser, backend, query = '', eventName = 'Test Fest') {
+async function newPage(browser, backend, query = '', eventName = 'Test Fest', options = {}) {
   const ctx = await browser.newContext({ serviceWorkers: 'block' });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log('PAGE ERROR', e.stack || e.message));
   page.on('dialog', (d) => d.accept());
-  await page.addInitScript(() => {
+  if (options.clock) await page.clock.install();
+  await page.addInitScript(({ serviceWorkerStub }) => {
     window.__cspViolations = [];
     window.__oneSignalPermissionRequests = 0;
+    window.addEventListener('beforeunload', () => sessionStorage.setItem('__testBeforeUnload', 'true'));
+    if (serviceWorkerStub) {
+      const workerEvents = new EventTarget();
+      const registration = {
+        updateCalls: 0,
+        update: async () => { registration.updateCalls += 1; },
+      };
+      Object.defineProperty(navigator, 'serviceWorker', {
+        configurable: true,
+        value: Object.assign(workerEvents, {
+          controller: serviceWorkerStub === 'controlled' ? {} : null,
+          register: async () => registration,
+        }),
+      });
+      window.__swRegistration = registration;
+      window.__activateAppUpdate = () => workerEvents.dispatchEvent(new Event('controllerchange'));
+    }
     if (new URLSearchParams(location.search).has('pushOn') && 'Notification' in window) {
       Object.defineProperty(Notification, 'permission', { configurable: true, value: 'granted' });
     }
     document.addEventListener('securitypolicyviolation', (e) => window.__cspViolations.push(`${e.violatedDirective} ${e.blockedURI}`));
-  });
+  }, { serviceWorkerStub: options.serviceWorkerStub || '' });
   const pageConfig = CONFIG.replace("EVENT_NAME: 'Test Fest'", `EVENT_NAME: ${JSON.stringify(eventName)}`);
   await page.route('**/config.js', (r) => r.fulfill({ body: pageConfig, contentType: 'text/javascript' }));
   await page.route('https://accounts.google.com/**', (r) => r.fulfill({ body: GSI_STUB, contentType: 'text/javascript' }));
@@ -481,6 +499,91 @@ async function assertTourStep(page, id, tab, target = null) {
     assert(!(await visible(installPage, '#banner-install')), 'install confirmation disappears after five seconds');
     await installPage.close();
 
+    console.log('Installed apps check for and safely apply updates');
+    const updatePage = await newPage(browser, makeBackend(), '', 'Test Fest', {
+      clock: true,
+      serviceWorkerStub: 'controlled',
+    });
+    await updatePage.waitForSelector('#fake-gsi');
+    await updatePage.waitForFunction(() => window.__swRegistration.updateCalls >= 1);
+    assert(true, 'service worker checks for an update after registration');
+    const checksBeforeForeground = await updatePage.evaluate(() => window.__swRegistration.updateCalls);
+    await updatePage.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    assert(await updatePage.evaluate(() => window.__swRegistration.updateCalls) > checksBeforeForeground,
+      'returning to the foreground checks for an update');
+    const checksBeforeInterval = await updatePage.evaluate(() => window.__swRegistration.updateCalls);
+    await updatePage.clock.fastForward(30 * 60 * 1000);
+    assert(await updatePage.evaluate(() => window.__swRegistration.updateCalls) > checksBeforeInterval,
+      'an open app checks for updates every 30 minutes');
+    await updatePage.evaluate(() => window.__activateAppUpdate());
+    assert(await visible(updatePage, '#banner-update'), 'an activated replacement worker shows the update card');
+    assert((await updatePage.textContent('#update-text')).includes('App updated'),
+      'update card explains that a reload is ready');
+    const manualReload = updatePage.waitForNavigation();
+    await updatePage.click('#update-btn');
+    await manualReload;
+    assert(await updatePage.evaluate(() => sessionStorage.getItem('__testBeforeUnload')) === 'true',
+      'Reload applies the update immediately');
+    await updatePage.close();
+
+    const firstInstallPage = await newPage(browser, makeBackend(), '', 'Test Fest', {
+      serviceWorkerStub: 'uncontrolled',
+    });
+    await firstInstallPage.waitForSelector('#fake-gsi');
+    await firstInstallPage.evaluate(() => window.__activateAppUpdate());
+    assert(!(await visible(firstInstallPage, '#banner-update')),
+      'the first controlling worker does not show a false update prompt');
+    await firstInstallPage.close();
+
+    const safeReloadPage = await newPage(browser, makeBackend(), '', 'Test Fest', {
+      clock: true,
+      serviceWorkerStub: 'controlled',
+    });
+    await safeReloadPage.waitForSelector('#fake-gsi');
+    await safeReloadPage.evaluate(() => {
+      const input = document.createElement('input');
+      input.id = 'update-reload-guard';
+      document.body.append(input);
+      input.focus();
+      window.__activateAppUpdate();
+    });
+    await safeReloadPage.clock.fastForward(30 * 1000);
+    assert(await safeReloadPage.evaluate(() => !sessionStorage.getItem('__testBeforeUnload')),
+      'automatic update reload waits while an editable control has focus');
+    const safeReload = safeReloadPage.waitForNavigation();
+    await safeReloadPage.evaluate(() => document.querySelector('#update-reload-guard').blur());
+    await safeReloadPage.clock.fastForward(1000);
+    await safeReload;
+    assert(await safeReloadPage.evaluate(() => sessionStorage.getItem('__testBeforeUnload')) === 'true',
+      'automatic update reload proceeds after the app becomes idle');
+    await safeReloadPage.close();
+
+    const requestGuardBackend = makeBackend();
+    const requestGuardPage = await newPage(browser, requestGuardBackend, '', 'Test Fest', {
+      clock: true,
+      serviceWorkerStub: 'controlled',
+    });
+    await requestGuardPage.waitForSelector('#fake-gsi');
+    await signIn(requestGuardPage, 'admin@gmail.com');
+    await enter(requestGuardPage);
+    await requestGuardPage.evaluate(() => window.__activateAppUpdate());
+    await requestGuardPage.clock.fastForward(29 * 1000);
+    requestGuardBackend.delayMs = 700;
+    await requestGuardPage.click('#refresh-btn');
+    await requestGuardPage.clock.fastForward(1000);
+    assert(await requestGuardPage.evaluate(() => !sessionStorage.getItem('__testBeforeUnload')),
+      'automatic update reload waits while a background request is active');
+    await requestGuardPage.waitForTimeout(750);
+    const requestGuardReload = requestGuardPage.waitForNavigation();
+    await requestGuardPage.clock.fastForward(1000);
+    await requestGuardReload;
+    assert(await requestGuardPage.evaluate(() => sessionStorage.getItem('__testBeforeUnload')) === 'true',
+      'automatic update reload proceeds after the background request finishes');
+    await requestGuardPage.close();
+
     console.log('Token issued for another client is rejected client-side');
     const before = backend.calls;
     const foreign = `h.${b64({ email: 'admin@gmail.com', aud: 'evil.apps.googleusercontent.com', exp: Math.floor(Date.now() / 1000) + 3600 })}.s`;
@@ -605,6 +708,19 @@ async function assertTourStep(page, id, tab, target = null) {
 
     console.log('Admin manages group labels');
     await page.click('[data-tab="members"]');
+    assert(await page.isVisible('[data-section="member-search"]'), 'member search has a dedicated card');
+    assert((await page.textContent('[data-section="member-search"]')).includes('Find a member'),
+      'member search has a visible label');
+    assert((await page.textContent('[data-member-search-count]')).includes('2 of 2'),
+      'member search initially reports every member');
+    await page.fill('[data-action="member-search"]', 'viewer');
+    assert((await page.textContent('[data-member-search-count]')).includes('1 of 2'),
+      'member search reports the filtered result count');
+    assert(await page.isVisible('[data-action="member-search-clear"]'), 'a search query exposes a clear action');
+    await page.click('[data-action="member-search-clear"]');
+    assert(await page.inputValue('[data-action="member-search"]') === '', 'Clear resets member search');
+    assert(await page.locator('[data-action="member-search"]').evaluate((input) => input === document.activeElement),
+      'Clear returns focus to member search');
     const inviteSection = await page.$eval('[data-section="member-invite"]', (section) => {
       const style = getComputedStyle(section);
       return { text: section.textContent, borderWidth: style.borderTopWidth, backgroundImage: style.backgroundImage };
@@ -661,6 +777,24 @@ async function assertTourStep(page, id, tab, target = null) {
     await page.waitForSelector('#view >> text=(archived)');
     backend.delayMs = 0;
     assert(backend.groupCatalog.some((g) => g.label === 'Cousins' && g.status === 'Archived'), 'group label can be archived from Members & access');
+    const viewerGroups = page.locator('[data-member-groups][data-email="viewer@gmail.com"]');
+    assert(!(await viewerGroups.getAttribute('open')), 'member groups are collapsed by default');
+    assert(!(await viewerGroups.locator('[data-action="save-member-groups"]').isVisible()),
+      'collapsed groups hide their editor and save action');
+    assert(await page.locator('select[data-action="set-role"][data-email="viewer@gmail.com"]').isVisible(),
+      'member role remains visible while groups are collapsed');
+    assert((await viewerGroups.locator('summary').textContent()).includes('Groups') &&
+      (await viewerGroups.locator('summary').textContent()).includes('0 assigned'),
+    'group summary reports the saved assignment count');
+    await viewerGroups.locator('summary').click();
+    assert(await viewerGroups.locator('[data-action="save-member-groups"]').isVisible(),
+      'group disclosure reveals the existing editor');
+    await page.fill('[data-action="member-search"]', 'admin');
+    assert(!(await page.locator('[data-member-groups][data-email="viewer@gmail.com"]').count()),
+      'member search can temporarily hide an expanded group editor');
+    await page.click('[data-action="member-search-clear"]');
+    assert(await page.locator('[data-member-groups][data-email="viewer@gmail.com"]').getAttribute('open') !== null,
+      'an expanded group editor remains open after filtering it out and restoring it');
 
     console.log('Admin creates a ceremony and an arrival from the app');
     await page.click('[data-tab="control"]');
@@ -796,6 +930,9 @@ async function assertTourStep(page, id, tab, target = null) {
     assert(await page.isVisible('text=tour skipped'), 'admins can see who skipped the tour');
     assert(await page.isDisabled('select[data-email="admin@gmail.com"]'), 'own role select disabled');
     assert(await page.isDisabled('[data-action="remove-member"][data-email="admin@gmail.com"]'), 'own remove disabled');
+    if ((await page.locator('[data-member-groups][data-email="viewer@gmail.com"]').getAttribute('open')) === null) {
+      await page.locator('[data-member-groups][data-email="viewer@gmail.com"] summary').click();
+    }
     await page.check('input[data-action="member-groups"][data-email="viewer@gmail.com"][value="Family"]');
     await page.check('input[data-action="member-groups"][data-email="viewer@gmail.com"][value="Friends"]');
     backend.delayMs = 700;

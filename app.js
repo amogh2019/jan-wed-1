@@ -151,6 +151,7 @@
       logisticsMode: 'pickup', // 'pickup' (arrivals) | 'drop' (departures)
       pickupSearch: '',
       memberSearch: '',
+      openMemberGroups: new Set(),
       tourStatus: 'Completed', // real value arrives with the session; never tour before that
       pending: new Set(), // keys of in-flight admin actions
     },
@@ -173,27 +174,32 @@
   }
 
   const Api = {
+    activeRequests: 0,
     configured() { return BACKEND_RE.test(String(CONFIG.APPS_SCRIPT_URL || '')); },
 
     async request(url, options = {}) {
       if (!this.configured()) throw new ApiError('CONFIG', 'Backend URL is not configured correctly in config.js.');
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), CONFIG.REQUEST_TIMEOUT_MS || 25000);
-      let res;
+      this.activeRequests += 1;
       try {
-        res = await fetch(url, {
-          ...options, signal: controller.signal, redirect: 'follow', cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer',
-        });
-      } catch (err) {
-        if (err.name === 'AbortError') throw new ApiError('TIMEOUT', 'The server took too long to respond.');
-        throw new ApiError('NETWORK', navigator.onLine ? 'Could not reach the server.' : 'You appear to be offline.');
+        let res;
+        try {
+          res = await fetch(url, {
+            ...options, signal: controller.signal, redirect: 'follow', cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer',
+          });
+        } catch (err) {
+          if (err.name === 'AbortError') throw new ApiError('TIMEOUT', 'The server took too long to respond.');
+          throw new ApiError('NETWORK', navigator.onLine ? 'Could not reach the server.' : 'You appear to be offline.');
+        }
+        let body;
+        try { body = await res.json(); } catch { throw new ApiError('BAD_RESPONSE', `Unexpected server response (HTTP ${res.status}).`); }
+        if (body?.ok !== true) throw new ApiError(String(body?.code || 'SERVER_ERROR'), String(body?.error || 'Request failed.').slice(0, 300));
+        return body.data;
       } finally {
         clearTimeout(timer);
+        this.activeRequests -= 1;
       }
-      let body;
-      try { body = await res.json(); } catch { throw new ApiError('BAD_RESPONSE', `Unexpected server response (HTTP ${res.status}).`); }
-      if (body?.ok !== true) throw new ApiError(String(body?.code || 'SERVER_ERROR'), String(body?.error || 'Request failed.').slice(0, 300));
-      return body.data;
     },
 
     /** Every POST carries the verified identity + timestamp for the AuditLog. */
@@ -453,7 +459,7 @@
       storage.remove(STORAGE.CREDENTIAL);
       storage.remove(STORAGE.LAST_USER);
       storage.remove(STORAGE.DATA_CACHE);
-      Store.set({ user: null, role: null, isAdmin: false, loading: false, itinerary: [], logistics: [], members: [], myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, broadcastDraft: { title: '', body: '', groups: [] }, familyContact: null, tab: 'schedule', lastSynced: null, ...patch });
+      Store.set({ user: null, role: null, isAdmin: false, loading: false, itinerary: [], logistics: [], members: [], myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, familyContact: null, tab: 'schedule', lastSynced: null, ...patch });
     },
 
     deny(email) {
@@ -469,7 +475,7 @@
       void Push.logout();
       sessionStore.remove(STORAGE.CREDENTIAL);
       // Admin-only data must not linger on screen after the session ends.
-      Store.set({ authStatus: 'signed-out', user: null, isAdmin: false, role: null, logistics: [], members: [], myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, broadcastDraft: { title: '', body: '', groups: [] }, loading: false, tab: 'schedule' });
+      Store.set({ authStatus: 'signed-out', user: null, isAdmin: false, role: null, logistics: [], members: [], myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, loading: false, tab: 'schedule' });
       Modal.close();
       Tour.cancel();
       this.prompt();
@@ -760,6 +766,77 @@
         <button type="button" class="btn-primary w-full mt-5" data-modal="close">Got it</button>`, {
         onMount: (root) => root.querySelector('[data-modal="close"]').addEventListener('click', () => Modal.close()),
       });
+    },
+  };
+
+  /* ----------------------------------------------------------- App update */
+  const AppUpdate = {
+    CHECK_INTERVAL_MS: 30 * 60 * 1000,
+    AUTO_RELOAD_MS: 30 * 1000,
+    BUSY_RETRY_MS: 1000,
+    registration: null,
+    hadControllerAtLoad: false,
+    firstControllerSeen: false,
+    reloadTimer: null,
+
+    init() {
+      if (!('serviceWorker' in navigator)) return;
+      this.hadControllerAtLoad = Boolean(navigator.serviceWorker.controller);
+      navigator.serviceWorker.addEventListener('controllerchange', () => this.controllerChanged());
+      $('#update-btn').addEventListener('click', () => location.reload());
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') void this.check();
+      });
+    },
+
+    async register() {
+      try {
+        this.registration = await navigator.serviceWorker.register(`${BASE_PATH}service-worker.js`, { scope: BASE_PATH });
+        await this.check();
+        setInterval(() => { void this.check(); }, this.CHECK_INTERVAL_MS);
+      } catch (err) {
+        console.warn('Service worker registration failed', err);
+      }
+    },
+
+    async check() {
+      if (!this.registration) return;
+      try {
+        await this.registration.update();
+      } catch (err) {
+        console.warn('Service worker update check failed', err);
+      }
+    },
+
+    controllerChanged() {
+      if (!this.hadControllerAtLoad && !this.firstControllerSeen) {
+        this.firstControllerSeen = true;
+        return;
+      }
+      const banner = $('#banner-update');
+      banner.classList.remove('hidden');
+      banner.classList.add('flex');
+      if (!this.reloadTimer) this.reloadTimer = setTimeout(() => this.reloadWhenIdle(), this.AUTO_RELOAD_MS);
+    },
+
+    reloadWhenIdle() {
+      this.reloadTimer = null;
+      if (this.isBusy()) {
+        this.reloadTimer = setTimeout(() => this.reloadWhenIdle(), this.BUSY_RETRY_MS);
+        return;
+      }
+      location.reload();
+    },
+
+    isBusy() {
+      const active = document.activeElement;
+      const editing = active?.matches('input, select, textarea, [contenteditable]:not([contenteditable="false"])');
+      return Api.activeRequests > 0 ||
+        Store.state.pending.size > 0 ||
+        Boolean($('#modal-root')?.childElementCount) ||
+        Tour.active ||
+        Welcome.open ||
+        Boolean(editing);
     },
   };
 
@@ -1633,19 +1710,28 @@
               <p class="text-xs text-ink-400 truncate">· Added by ${escapeHtml(m.addedBy || '—')}</p>
               <p class="text-xs text-ink-400 truncate">${addedLine(m)}</p>
               <p class="text-xs text-ink-400 truncate"> ${tourChip(m.tourStatus)}</p>
-              <label class="block mt-2 text-[11px] text-ink-500">Groups
-                ${groupPicker(s.groupCatalog, s.memberGroupsDrafts[m.email] ?? (m.groups || []), 'member-groups', { email: m.email }, groupsBusy)}
-              </label>
-              <button data-action="save-member-groups" data-email="${escapeHtml(m.email)}" ${groupsBusy ? 'disabled' : ''} ${pendingAttrs(`member-groups:${m.email}`)} class="btn btn-ghost btn-sm mt-1 min-h-[40px]">${spinnerOr(`member-groups:${m.email}`, 'Save groups')}</button>
-              <select data-action="set-role" data-email="${escapeHtml(m.email)}" aria-label="Role for ${escapeHtml(m.email)}" ${self || busy || lastAdmin ? 'disabled' : ''}
-                title="${lockReason(self, lastAdmin, 'You cannot change your own role', 'Change role')}"
-                class="shrink-0 rounded-lg border border-haldi-300 bg-ivory-50 text-xs px-2 py-1.5 disabled:opacity-50">${roleOptions(m.role)}</select>
-              ${busy ? '<span role="status" aria-label="Updating member"><span class="spinner" aria-hidden="true"></span><span class="sr-only">Updating member</span></span>' : ''}
-              <button data-action="remove-member" data-email="${escapeHtml(m.email)}" ${self || busy || lastAdmin ? 'disabled' : ''} ${pendingAttrs(`member:${m.email}`)}
-                title="${lockReason(self, lastAdmin, 'You cannot remove yourself', 'Remove member')}" aria-label="Remove ${escapeHtml(m.email)}"
-                class="btn btn-danger btn-sm shrink-0">
-                ${busy ? '<span class="spinner" aria-hidden="true"></span><span class="sr-only">Working: Remove member</span>' : 'Remove'}
-              </button>
+              <div class="mt-2 flex items-center gap-2">
+                <select data-action="set-role" data-email="${escapeHtml(m.email)}" aria-label="Role for ${escapeHtml(m.email)}" ${self || busy || lastAdmin ? 'disabled' : ''}
+                  title="${lockReason(self, lastAdmin, 'You cannot change your own role', 'Change role')}"
+                  class="min-h-[44px] flex-1 rounded-lg border border-haldi-300 bg-ivory-50 px-2 py-1.5 text-xs disabled:opacity-50">${roleOptions(m.role)}</select>
+                ${busy ? '<span role="status" aria-label="Updating member"><span class="spinner" aria-hidden="true"></span><span class="sr-only">Updating member</span></span>' : ''}
+                <button data-action="remove-member" data-email="${escapeHtml(m.email)}" ${self || busy || lastAdmin ? 'disabled' : ''} ${pendingAttrs(`member:${m.email}`)}
+                  title="${lockReason(self, lastAdmin, 'You cannot remove yourself', 'Remove member')}" aria-label="Remove ${escapeHtml(m.email)}"
+                  class="btn btn-danger btn-sm shrink-0 min-h-[44px]">
+                  ${busy ? '<span class="spinner" aria-hidden="true"></span><span class="sr-only">Working: Remove member</span>' : 'Remove'}
+                </button>
+              </div>
+              <details data-member-groups data-email="${escapeHtml(m.email)}" class="mt-2 rounded-xl border border-haldi-200 bg-haldi-50/60 px-3">
+                <summary class="min-h-[44px] cursor-pointer py-3 font-semibold text-xs text-ink-700">
+                  Groups · ${(m.groups || []).length} assigned
+                </summary>
+                <div class="border-t border-haldi-200 pb-3 pt-2">
+                  <label class="block text-[11px] text-ink-500">Choose group labels
+                    ${groupPicker(s.groupCatalog, s.memberGroupsDrafts[m.email] ?? (m.groups || []), 'member-groups', { email: m.email }, groupsBusy)}
+                  </label>
+                  <button data-action="save-member-groups" data-email="${escapeHtml(m.email)}" ${groupsBusy ? 'disabled' : ''} ${pendingAttrs(`member-groups:${m.email}`)} class="btn btn-ghost btn-sm mt-2 min-h-[44px]">${spinnerOr(`member-groups:${m.email}`, 'Save groups')}</button>
+                </div>
+              </details>
             </div>
           </li>`;
         }).join('')}
@@ -1691,7 +1777,20 @@
           </button>
         </form>
       </section>
-      <input type="search" data-action="member-search" value="${escapeHtml(s.memberSearch)}" placeholder="Search members…" aria-label="Search members" class="input mb-3" />
+      <section data-section="member-search" class="card mb-4 border border-haldi-200 bg-gradient-to-br from-ivory-50 to-haldi-50 p-4">
+        <div class="flex items-center justify-between gap-3">
+          <div>
+            <p class="eyebrow">Member directory</p>
+            <h3 class="font-display text-xl text-kumkum-700">Find a member</h3>
+          </div>
+          <span data-member-search-count class="shrink-0 rounded-full bg-kumkum-100 px-3 py-1 text-xs font-semibold text-kumkum-700">${list.length} of ${s.members.length}</span>
+        </div>
+        <div class="relative mt-3">
+          <span class="pointer-events-none absolute inset-y-0 left-3 grid place-items-center text-ink-400" aria-hidden="true">⌕</span>
+          <input type="search" data-action="member-search" value="${escapeHtml(s.memberSearch)}" placeholder="Name, role, or group…" aria-label="Search members" class="input min-h-[48px] pl-10 ${q ? 'pr-20' : ''}" />
+          ${q ? '<button type="button" data-action="member-search-clear" class="absolute inset-y-1 right-1 rounded-lg px-3 text-xs font-semibold text-kumkum-700 hover:bg-kumkum-50">Clear</button>' : ''}
+        </div>
+      </section>
       ${list.length ? listHtml : empty}`;
   };
 
@@ -1808,9 +1907,16 @@
     const draft = before ? { email: before.email.value, role: before.role.value, groups: checkedGroups(before.form), focused: active === before.email } : null;
     const groupInput = $('form[data-action="add-group"] input[name="label"]');
     const groupDraft = groupInput ? { value: groupInput.value, focused: active === groupInput } : null;
+    $$('[data-member-groups]').forEach((details) => {
+      if (details.open) s.openMemberGroups.add(details.dataset.email);
+      else s.openMemberGroups.delete(details.dataset.email);
+    });
 
     $('#view').innerHTML = (Views[s.tab] || Views.schedule)(s);
     applyProgressWidths();
+    $$('[data-member-groups]').forEach((details) => {
+      details.open = s.openMemberGroups.has(details.dataset.email);
+    });
 
     const after = memberFormFields();
     if (after && draft) {
@@ -2361,6 +2467,10 @@
         case 'delete-event': void Actions.deleteEvent(id); break;
         case 'save-event-groups': void Actions.updateEventGroups(id); break;
         case 'save-member-groups': void Actions.updateMemberGroups(el.dataset.email); break;
+        case 'member-search-clear':
+          Store.set({ memberSearch: '' });
+          $('#view [data-action="member-search"]')?.focus();
+          break;
         case 'archive-group': void Actions.archiveGroup(el.dataset.label); break;
         case 'clear-notifications': void Actions.clearNotifications(); break;
         case 'add-pickup': Actions.openTravelForm(); break;
@@ -2444,14 +2554,6 @@
   }
 
   /* --------------------------------------------------------------- Boot */
-  function registerServiceWorker() {
-    if (!('serviceWorker' in navigator)) return;
-    window.addEventListener('load', () => {
-      navigator.serviceWorker.register(`${BASE_PATH}service-worker.js`, { scope: BASE_PATH })
-        .catch((err) => console.warn('Service worker registration failed', err));
-    });
-  }
-
   function warnIfUnconfigured() {
     const missing = ['APPS_SCRIPT_URL', 'GOOGLE_CLIENT_ID', 'ONESIGNAL_APP_ID'].filter((k) => isPlaceholder(CONFIG[k]));
     if (missing.length) console.warn(`[config] Missing values in config.js: ${missing.join(', ')}`);
@@ -2462,7 +2564,8 @@
     Store.subscribe(render);
     bindEvents();
     render(Store.state);
-    registerServiceWorker();
+    AppUpdate.init();
+    window.addEventListener('load', () => { void AppUpdate.register(); });
     Install.init();
     Push.init();
     void Auth.init();
