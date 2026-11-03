@@ -824,6 +824,13 @@ async function assertTourStep(page, id, tab, target = null) {
     await firstEventControl.locator('summary').click();
     assert(await firstEventControl.locator('[data-action="open-broadcast"]').isVisible(),
       'expanding an event reveals its actions');
+    const eventControlBox = await firstEventControl.boundingBox();
+    const broadcastButtonBox = await firstEventControl.locator('[data-action="open-broadcast"]').boundingBox();
+    assert(eventControlBox && broadcastButtonBox
+      && broadcastButtonBox.x - eventControlBox.x >= 14
+      && eventControlBox.x + eventControlBox.width
+        - (broadcastButtonBox.x + broadcastButtonBox.width) >= 14,
+    'expanded event actions retain horizontal spacing inside the card');
     await page.click('[data-action="add-event"]');
     await page.fill('#modal-root input[name="title"]', 'Haldi');
     assert((await page.getAttribute('#modal-root input[name="day"]', 'type')) === 'date', 'day is a date picker');
