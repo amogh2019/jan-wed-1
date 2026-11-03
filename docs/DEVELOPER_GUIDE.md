@@ -194,6 +194,7 @@ Do these in order (each step is reversible until the last):
 
 ## 11. Changelog
 
+- **v1.7.14** Notifications view now sorts announcements by timestamp, newest first and oldest last, regardless of backend row order. No backend change.
 - **v1.7.13** Rebuilt the Tailwind stylesheet so expanded Event Control actions apply their intended left/right spacing instead of touching the card edges.
 - **v1.7.12** Event Control ceremonies now use collapsed cards that retain essential schedule, audience, and status details while hiding actions until expanded; open cards survive rerenders. PWA update checks now reuse the combined OneSignal registration and suppress all fresh-install controller changes, preventing recurring false update/reload cycles.
 - **v1.7.11** Member search now filters by partial email address from the first character and ignores role and group text.

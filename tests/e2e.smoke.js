@@ -1016,6 +1016,9 @@ async function assertTourStep(page, id, tab, target = null) {
     assert(audienceText.includes('Group A notice') && audienceText.includes('Live now: Welcome') &&
       !audienceText.includes('Group B notice'),
     'notifications show matching-group and everyone notices, but hide other-group notices');
+    const noticeTitles = await audiencePage.$$eval('#view article h3', (nodes) => nodes.map((n) => n.textContent.trim()));
+    assert(noticeTitles[0] === 'Group A notice' && noticeTitles.at(-1) === 'Live now: Welcome',
+      `notices are listed newest first, oldest last (got ${noticeTitles.join(' | ')})`);
     await audiencePage.close();
 
     console.log('Notification click opens Notices without onboarding overlays');

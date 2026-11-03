@@ -1800,7 +1800,7 @@
   };
 
   Views.notifications = (s) => {
-    const items = s.notifications || [];
+    const items = [...(s.notifications || [])].sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
     return `
       ${pageHeader('Announcements from the hosts', 'Notifications', '', 'notifications-overview')}
       <section class="card p-4 mb-3">
