@@ -210,14 +210,20 @@ async function newPage(browser, backend, query = '', eventName = 'Test Fest', op
     if (serviceWorkerStub) {
       const workerEvents = new EventTarget();
       const registration = {
+        registerCalls: 0,
         updateCalls: 0,
         update: async () => { registration.updateCalls += 1; },
       };
+      const hasExistingRegistration = serviceWorkerStub === 'controlled';
       Object.defineProperty(navigator, 'serviceWorker', {
         configurable: true,
         value: Object.assign(workerEvents, {
-          controller: serviceWorkerStub === 'controlled' ? {} : null,
-          register: async () => registration,
+          controller: hasExistingRegistration ? {} : null,
+          getRegistration: async () => hasExistingRegistration ? registration : undefined,
+          register: async () => {
+            registration.registerCalls += 1;
+            return registration;
+          },
         }),
       });
       window.__swRegistration = registration;
@@ -507,6 +513,8 @@ async function assertTourStep(page, id, tab, target = null) {
     await updatePage.waitForSelector('#fake-gsi');
     await updatePage.waitForFunction(() => window.__swRegistration.updateCalls >= 1);
     assert(true, 'service worker checks for an update after registration');
+    assert(await updatePage.evaluate(() => window.__swRegistration.registerCalls) === 0,
+      'app reuses the existing combined service-worker registration');
     const checksBeforeForeground = await updatePage.evaluate(() => window.__swRegistration.updateCalls);
     await updatePage.evaluate(() => {
       Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
@@ -534,8 +542,9 @@ async function assertTourStep(page, id, tab, target = null) {
     });
     await firstInstallPage.waitForSelector('#fake-gsi');
     await firstInstallPage.evaluate(() => window.__activateAppUpdate());
+    await firstInstallPage.evaluate(() => window.__activateAppUpdate());
     assert(!(await visible(firstInstallPage, '#banner-update')),
-      'the first controlling worker does not show a false update prompt');
+      'controller changes during first install do not show a false update prompt');
     await firstInstallPage.close();
 
     const safeReloadPage = await newPage(browser, makeBackend(), '', 'Test Fest', {
@@ -803,6 +812,18 @@ async function assertTourStep(page, id, tab, target = null) {
     await page.click('[data-tab="control"]');
     assert((await page.textContent('[data-tab="control"]')).trim() === 'Event Control', 'tab renamed to Event Control');
     await page.click('[data-tab="control"]');
+    const firstEventControl = page.locator('[data-event-control][data-id="1"]');
+    assert(!(await firstEventControl.getAttribute('open')), 'event controls are collapsed by default');
+    const firstEventSummary = await firstEventControl.locator('summary').innerText();
+    assert(firstEventSummary.includes('Event 1') && firstEventSummary.includes('Welcome')
+      && firstEventSummary.includes('Hall') && firstEventSummary.includes('Upcoming')
+      && firstEventSummary.includes('Everyone'),
+    'collapsed event summary keeps its schedule, location, audience and status visible');
+    assert(!(await firstEventControl.locator('[data-action="open-broadcast"]').isVisible()),
+      'event actions stay hidden until the card is expanded');
+    await firstEventControl.locator('summary').click();
+    assert(await firstEventControl.locator('[data-action="open-broadcast"]').isVisible(),
+      'expanding an event reveals its actions');
     await page.click('[data-action="add-event"]');
     await page.fill('#modal-root input[name="title"]', 'Haldi');
     assert((await page.getAttribute('#modal-root input[name="day"]', 'type')) === 'date', 'day is a date picker');
@@ -831,6 +852,9 @@ async function assertTourStep(page, id, tab, target = null) {
     backend.delayMs = 0;
     assert(backend.itinerary.some((e) => e.title === 'Haldi' && e.day === 'Sat, Jan 23' && e.time === '7:05 PM' && e.mapLink === 'https://maps.app.goo.gl/abc123' && e.groups.join() === 'Family,Hosts'), 'event created with date, map link and multiple audience groups');
     assert(!(await page.$('#modal-root [role="dialog"]')), 'create modal closed');
+    assert(await page.locator('[data-event-control][data-id="1"]').getAttribute('open') !== null,
+      'expanded event controls remain open after a rerender');
+    await page.locator('[data-event-control][data-id="2"] summary').click();
 
     await page.uncheck('[data-action="event-groups"][data-id="2"][value="Hosts"]');
     backend.delayMs = 700;

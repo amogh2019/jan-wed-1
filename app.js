@@ -151,6 +151,7 @@
       logisticsMode: 'pickup', // 'pickup' (arrivals) | 'drop' (departures)
       pickupSearch: '',
       memberSearch: '',
+      openEventControls: new Set(),
       openMemberGroups: new Set(),
       tourStatus: 'Completed', // real value arrives with the session; never tour before that
       pending: new Set(), // keys of in-flight admin actions
@@ -459,7 +460,7 @@
       storage.remove(STORAGE.CREDENTIAL);
       storage.remove(STORAGE.LAST_USER);
       storage.remove(STORAGE.DATA_CACHE);
-      Store.set({ user: null, role: null, isAdmin: false, loading: false, itinerary: [], logistics: [], members: [], myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, familyContact: null, tab: 'schedule', lastSynced: null, ...patch });
+      Store.set({ user: null, role: null, isAdmin: false, loading: false, itinerary: [], logistics: [], members: [], myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openEventControls: new Set(), openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, familyContact: null, tab: 'schedule', lastSynced: null, ...patch });
     },
 
     deny(email) {
@@ -475,7 +476,7 @@
       void Push.logout();
       sessionStore.remove(STORAGE.CREDENTIAL);
       // Admin-only data must not linger on screen after the session ends.
-      Store.set({ authStatus: 'signed-out', user: null, isAdmin: false, role: null, logistics: [], members: [], myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, loading: false, tab: 'schedule' });
+      Store.set({ authStatus: 'signed-out', user: null, isAdmin: false, role: null, logistics: [], members: [], myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openEventControls: new Set(), openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, loading: false, tab: 'schedule' });
       Modal.close();
       Tour.cancel();
       this.prompt();
@@ -776,7 +777,6 @@
     BUSY_RETRY_MS: 1000,
     registration: null,
     hadControllerAtLoad: false,
-    firstControllerSeen: false,
     reloadTimer: null,
 
     init() {
@@ -791,7 +791,10 @@
 
     async register() {
       try {
-        this.registration = await navigator.serviceWorker.register(`${BASE_PATH}service-worker.js`, { scope: BASE_PATH });
+        this.registration = await navigator.serviceWorker.getRegistration(BASE_PATH);
+        if (!this.registration) {
+          this.registration = await navigator.serviceWorker.register(`${BASE_PATH}service-worker.js`, { scope: BASE_PATH });
+        }
         await this.check();
         setInterval(() => { void this.check(); }, this.CHECK_INTERVAL_MS);
       } catch (err) {
@@ -809,10 +812,7 @@
     },
 
     controllerChanged() {
-      if (!this.hadControllerAtLoad && !this.firstControllerSeen) {
-        this.firstControllerSeen = true;
-        return;
-      }
+      if (!this.hadControllerAtLoad) return;
       const banner = $('#banner-update');
       banner.classList.remove('hidden');
       banner.classList.add('flex');
@@ -1492,17 +1492,22 @@
           const busy = Store.isPending(key);
           const groupsBusy = Store.isPending(`event-groups:${e.id}`);
           return `
-          <article class="card p-4 ${e.status === 'Live' ? 'ring-2 ring-kumkum-400' : ''}">
-            <div class="flex items-start justify-between gap-2">
+          <details data-event-control data-id="${escapeHtml(e.id)}" class="card ${e.status === 'Live' ? 'ring-2 ring-kumkum-400' : ''}">
+            <summary class="min-h-[44px] cursor-pointer list-none p-4">
+              <div class="flex items-start justify-between gap-2">
               <div class="min-w-0">
-                <p class="text-[11px] font-semibold text-ink-400">#${escapeHtml(e.id)} · ${escapeHtml(e.day)} · ${escapeHtml(e.time)}</p>
+               <p class="text-[11px] font-semibold text-ink-400">Event ${escapeHtml(e.id)} · ${escapeHtml(e.day)} · ${escapeHtml(e.time)}</p>
                 <h4 class="font-semibold text-ink-900 truncate">${escapeHtml(e.title)}</h4>
                 <p class="text-sm text-ink-500 truncate inline-flex items-center gap-1">${pin}${escapeHtml(e.location || 'TBA')}</p>
                 <p class="text-[11px] text-ink-500 mt-1">Audience: <b>${escapeHtml((e.groups || []).join(', ') || 'Everyone')}</b></p>
               </div>
-              ${badge(e.status)}
-            </div>
-            <div class="mt-3 grid grid-cols-2 gap-2">
+               <div class="flex shrink-0 items-center gap-2">
+                 ${badge(e.status)}
+                 <span class="text-ink-400" aria-hidden="true">⌄</span>
+               </div>
+              </div>
+            </summary>
+            <div class="mx-4 mb-4 grid grid-cols-2 gap-2 border-t border-haldi-200 pt-3">
               <button data-action="open-broadcast" data-id="${escapeHtml(e.id)}" ${busy ? 'disabled' : ''} ${pendingAttrs(key)} class="btn btn-live col-span-2">
                 ${spinnerOr(key, e.status === 'Live' ? '📣 Re-announce &amp; Broadcast' : '🪔 Set Live &amp; Broadcast')}
               </button>
@@ -1520,7 +1525,7 @@
                 <button data-action="save-event-groups" data-id="${escapeHtml(e.id)}" ${groupsBusy ? 'disabled' : ''} ${pendingAttrs(`event-groups:${e.id}`)} class="btn btn-ghost btn-sm mt-2 min-h-[44px]">${spinnerOr(`event-groups:${e.id}`, 'Save audience')}</button>
               </div>
             </div>
-          </article>`;
+          </details>`;
         }).join('')}
       </div>`;
   };
@@ -1911,11 +1916,18 @@
       if (details.open) s.openMemberGroups.add(details.dataset.email);
       else s.openMemberGroups.delete(details.dataset.email);
     });
+    $$('[data-event-control]').forEach((details) => {
+      if (details.open) s.openEventControls.add(details.dataset.id);
+      else s.openEventControls.delete(details.dataset.id);
+    });
 
     $('#view').innerHTML = (Views[s.tab] || Views.schedule)(s);
     applyProgressWidths();
     $$('[data-member-groups]').forEach((details) => {
       details.open = s.openMemberGroups.has(details.dataset.email);
+    });
+    $$('[data-event-control]').forEach((details) => {
+      details.open = s.openEventControls.has(details.dataset.id);
     });
 
     const after = memberFormFields();
