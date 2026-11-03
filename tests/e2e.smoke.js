@@ -54,7 +54,8 @@ function makeBackend() {
     { email: 'admin@gmail.com', role: 'Admin', addedBy: 'setup()', addedDate: '', tourStatus: 'Completed', groups: [] },
     { email: 'viewer@gmail.com', role: 'Viewer', addedBy: 'admin@gmail.com', addedDate: '', tourStatus: 'Completed', groups: [] },
   ];
-  const itinerary = [{ id: '1', day: 'Fri', time: '10:00', title: 'Welcome', location: 'Hall', status: 'Upcoming', groups: [] }];
+  const itinerary = [{ id: '1', day: 'Fri', time: '10:00', title: 'Welcome', location: 'Hall',
+    mapLink: 'https://maps.app.goo.gl/welcome123', status: 'Upcoming', groups: [] }];
   const groupCatalog = [];
   const logistics = [{ id: 'G1', name: 'Verma family', members: '3', contact: '+91 98765 43210', email: 'viewer@gmail.com',
     arrival: '2027-01-22T14:30:00+05:30', departure: '', mode: 'Train', pickupStatus: 'Pending', dropStatus: 'Pending' }];
@@ -506,6 +507,10 @@ async function assertTourStep(page, id, tab, target = null) {
     await page.waitForSelector('text=Namaste');
     const bar = await page.$eval('[data-progress]', (e) => ({ want: `${e.dataset.progress}%`, got: e.style.width }));
     assert(bar.got === bar.want, 'progress bar width applied without inline style attributes');
+    const scheduleMapLink = await page.$eval('#view a[href="https://maps.app.goo.gl/welcome123"]',
+      (link) => ({ target: link.getAttribute('target'), rel: link.getAttribute('rel') }));
+    assert(scheduleMapLink.target === null && scheduleMapLink.rel === null,
+      'schedule map links navigate in the current context for reliable iOS Maps handoff');
 
     console.log('Marquee recalculates when sign-in controls narrow the header');
     const marqueePage = await newPage(browser, backend, '', 'A Long Celebration Name That Must Fully Scroll Across the Header');
@@ -600,6 +605,13 @@ async function assertTourStep(page, id, tab, target = null) {
 
     console.log('Admin manages group labels');
     await page.click('[data-tab="members"]');
+    const inviteSection = await page.$eval('[data-section="member-invite"]', (section) => {
+      const style = getComputedStyle(section);
+      return { text: section.textContent, borderWidth: style.borderTopWidth, backgroundImage: style.backgroundImage };
+    });
+    assert(inviteSection.text.includes('Invite a member') && inviteSection.borderWidth !== '0px' &&
+      inviteSection.backgroundImage !== 'none',
+    'member invitation is presented as a distinct, labelled section');
     backend.failNextAction = 'addGroup';
     await page.fill('form[data-action="add-group"] input[name="label"]', 'Retry label');
     await page.click('form[data-action="add-group"] button[type="submit"]');
@@ -808,8 +820,8 @@ async function assertTourStep(page, id, tab, target = null) {
     audienceBackend.members.find((m) => m.email === 'viewer@gmail.com').tourStatus = 'Pending';
     audienceBackend.members[1].groups = ['Group A'];
     audienceBackend.itinerary.push(
-      { id: '2', day: 'Fri', time: '11:00', title: 'Group A event', location: 'Hall A', status: 'Upcoming', groups: ['Group A'] },
-      { id: '3', day: 'Fri', time: '12:00', title: 'Group B event', location: 'Hall B', status: 'Upcoming', groups: ['Group B'] },
+      { id: '2', day: 'Fri', time: '11:00', title: 'Group A event', location: 'Hall A', mapLink: '', status: 'Upcoming', groups: ['Group A'] },
+      { id: '3', day: 'Fri', time: '12:00', title: 'Group B event', location: 'Hall B', mapLink: '', status: 'Upcoming', groups: ['Group B'] },
     );
     audienceBackend.notifications.push(
       { id: 'n2', at: new Date().toISOString(), title: 'Group A notice', message: 'For A', eventId: '2', groups: ['Group A'] },

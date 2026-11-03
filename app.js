@@ -1206,7 +1206,7 @@
   const clock = '<svg class="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>';
 
   const locationLine = (e, cls = 'text-ink-500') => (e.location ? `
-    <a href="${escapeHtml(mapsLink(e))}" target="_blank" rel="noopener noreferrer"
+    <a href="${escapeHtml(mapsLink(e))}"
       class="inline-flex items-center gap-1 text-sm ${cls} hover:underline underline-offset-2">${pin}${escapeHtml(e.location)}</a>` : '');
 
   const ScheduleParts = {
@@ -1244,7 +1244,7 @@
             <span class="inline-flex items-center gap-1">${clock}${escapeHtml(e.time || 'Now')}</span>
             ${e.location ? `<span class="inline-flex items-center gap-1">${pin}${escapeHtml(e.location)}</span>` : ''}
           </p>
-          ${e.location ? `<a href="${escapeHtml(mapsLink(e))}" target="_blank" rel="noopener noreferrer" class="relative btn btn-gold btn-sm mt-4">Take me there</a>` : ''}
+          ${e.location ? `<a href="${escapeHtml(mapsLink(e))}" class="relative btn btn-gold btn-sm mt-4">Take me there</a>` : ''}
         </section>`).join('');
     },
 
@@ -1668,19 +1668,29 @@
           </li>`).join('')}
         </ul>` : emptyState('🏷️', 'No group labels yet', 'Add a label to make it available in member and ceremony forms.')}
       </section>
-      <form data-action="add-member" class="card p-4 mb-4 space-y-2" novalidate>
-        <label class="block text-xs font-semibold text-ink-500" for="new-member-email">Invite a guest</label>
-        <input id="new-member-email" name="email" type="email" inputmode="email" autocomplete="off" required placeholder="guest@gmail.com" class="input" />
-        <div class="flex gap-2">
-          <select name="role" aria-label="Role" class="input flex-1">${roleOptions(GUEST_ROLE)}</select>
-          <button type="submit" ${Store.isPending('member:add') ? 'disabled' : ''} ${pendingAttrs('member:add')} class="btn btn-primary shrink-0 px-6">
-            ${spinnerOr('member:add', 'Add')}
-          </button>
+      <section data-section="member-invite" class="relative overflow-hidden rounded-3xl border-2 border-marigold-300 bg-gradient-to-br from-marigold-50 via-ivory-50 to-haldi-50 p-4 mb-4 shadow-card">
+        <div class="relative flex items-start gap-3">
+          <div class="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-marigold-100 text-xl" aria-hidden="true">✉️</div>
+          <div>
+            <p class="eyebrow">New access</p>
+            <h3 class="font-display text-xl text-kumkum-700">Invite a member</h3>
+            <p class="mt-1 text-xs text-ink-600">Add their Google email, choose their role, and assign any guest groups.</p>
+          </div>
         </div>
-        <fieldset><legend class="block text-xs font-semibold text-ink-500">Groups (optional)</legend>
-          ${groupPicker(s.groupCatalog, [], 'add-member-groups')}
-        </fieldset>
-      </form>
+        <form data-action="add-member" class="relative mt-4 space-y-3 rounded-2xl border border-haldi-200 bg-ivory-50 p-3" novalidate>
+          <label class="block text-xs font-semibold text-ink-600" for="new-member-email">Google email</label>
+          <input id="new-member-email" name="email" type="email" inputmode="email" autocomplete="off" required placeholder="guest@gmail.com" class="input" />
+          <label class="block text-xs font-semibold text-ink-600">Access role
+            <select name="role" aria-label="Role" class="input mt-1">${roleOptions(GUEST_ROLE)}</select>
+          </label>
+          <fieldset><legend class="block text-xs font-semibold text-ink-600">Guest groups (optional)</legend>
+            ${groupPicker(s.groupCatalog, [], 'add-member-groups')}
+          </fieldset>
+          <button type="submit" ${Store.isPending('member:add') ? 'disabled' : ''} ${pendingAttrs('member:add')} class="btn btn-primary w-full">
+            ${spinnerOr('member:add', 'Add member')}
+          </button>
+        </form>
+      </section>
       <input type="search" data-action="member-search" value="${escapeHtml(s.memberSearch)}" placeholder="Search members…" aria-label="Search members" class="input mb-3" />
       ${list.length ? listHtml : empty}`;
   };
