@@ -470,14 +470,27 @@ var ACTIONS_ = {
       throw new AppError('CONFLICT', 'The form responses changed since you opened them. Please refresh and try again.');
     }
 
-    var memberTable = readTable_(SHEETS.MEMBERS);
     var existing = {};
     readMembers_().forEach(function (m) { existing[m.email] = true; });
     var toAdd = [entry.email].concat(entry.family).filter(function (e) { return !existing[e]; });
+    // The admin picks groups per entry; with no selection sent, new guests join every active group.
+    var warnings = entry.warnings.slice();
+    var groups;
+    if (payload.groups === undefined) {
+      groups = readGroupCatalog_().filter(function (g) { return g.status === 'Active'; })
+        .map(function (g) { return g.label; });
+      if (groups.length > MAX_GROUPS) {
+        warnings.push('Only the first ' + MAX_GROUPS + ' of ' + groups.length + ' groups were assigned.');
+        groups = groups.slice(0, MAX_GROUPS);
+      }
+    } else {
+      groups = resolveGroups_(payload.groups, []);
+    }
+    if (toAdd.length && groups.length) ensureColumns_(SHEETS.MEMBERS, OPTIONAL_HEADERS.Members);
     toAdd.forEach(function (e) {
-      appendRecord_(memberTable, { Email: e, Role: ROLES.ATITHI, AddedBy: user.email, AddedDate: new Date() });
+      appendRecord_(readTable_(SHEETS.MEMBERS), { Email: e, Role: ROLES.ATITHI, AddedBy: user.email, AddedDate: new Date(), Groups: groups.join(', ') });
       writeAudit_(user.email, AUDIT_CATEGORY.ADMIN, 'Added ' + e + ' to Members as ' + ROLES.ATITHI +
-        ' from form response row ' + row, req.timestamp);
+        (groups.length ? ' in groups ' + groups.join(', ') : '') + ' from form response row ' + row, req.timestamp);
     });
 
     var travelId = '';
@@ -497,7 +510,7 @@ var ACTIONS_ = {
     }
 
     return {
-      result: { added: toAdd, travelId: travelId, warnings: entry.warnings },
+      result: { added: toAdd, travelId: travelId, warnings: warnings },
       members: readMembers_(),
       logistics: readLogistics_(),
       formResponses: listFormResponses_(),

@@ -151,7 +151,7 @@
       logisticsMode: 'pickup', // 'pickup' (arrivals) | 'drop' (departures)
       pickupSearch: '',
       memberSearch: '',
-      formResponses: null, // admin: sign-ups read from the Google Form tab (loaded on demand)
+      formResponses: null, formGroupsDrafts: {}, // admin: sign-ups read from the Google Form tab (loaded on demand)
       openEventControls: new Set(),
       openMemberGroups: new Set(),
       tourStatus: 'Completed', // real value arrives with the session; never tour before that
@@ -461,7 +461,7 @@
       storage.remove(STORAGE.CREDENTIAL);
       storage.remove(STORAGE.LAST_USER);
       storage.remove(STORAGE.DATA_CACHE);
-      Store.set({ user: null, role: null, isAdmin: false, loading: false, itinerary: [], logistics: [], members: [], formResponses: null, myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openEventControls: new Set(), openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, familyContact: null, tab: 'schedule', lastSynced: null, ...patch });
+      Store.set({ user: null, role: null, isAdmin: false, loading: false, itinerary: [], logistics: [], members: [], formResponses: null, formGroupsDrafts: {}, myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openEventControls: new Set(), openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, familyContact: null, tab: 'schedule', lastSynced: null, ...patch });
     },
 
     deny(email) {
@@ -477,7 +477,7 @@
       void Push.logout();
       sessionStore.remove(STORAGE.CREDENTIAL);
       // Admin-only data must not linger on screen after the session ends.
-      Store.set({ authStatus: 'signed-out', user: null, isAdmin: false, role: null, logistics: [], members: [], formResponses: null, myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openEventControls: new Set(), openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, loading: false, tab: 'schedule' });
+      Store.set({ authStatus: 'signed-out', user: null, isAdmin: false, role: null, logistics: [], members: [], formResponses: null, formGroupsDrafts: {}, myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openEventControls: new Set(), openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, loading: false, tab: 'schedule' });
       Modal.close();
       Tour.cancel();
       this.prompt();
@@ -1685,6 +1685,9 @@
       ${contactCard}`;
   };
 
+  const activeGroupLabels = (catalog) => (catalog || []).filter((g) => g.status === 'Active').map((g) => g.label);
+  const formGroups = (s, row) => s.formGroupsDrafts[row] ?? activeGroupLabels(s.groupCatalog);
+
   const formResponsesSection = (s) => {
     const f = s.formResponses;
     const loading = Store.isPending('form:load');
@@ -1704,6 +1707,7 @@
             <p class="text-xs text-ink-500 break-words">${escapeHtml(people.join(', '))}</p>
             <p class="text-xs text-ink-400">${[i.mode, i.arrival && `Arrives ${formatDateTime(i.arrival)}`, i.departure && `Leaves ${formatDateTime(i.departure)}`].filter(Boolean).map(escapeHtml).join(' · ')}</p>
             ${i.warnings.map((w) => `<p class="mt-1 text-[11px] text-kumkum-700">⚠ ${escapeHtml(w)}</p>`).join('')}
+            <div class="mt-2"><p class="text-xs font-medium text-ink-700">Add to groups</p>${groupPicker(s.groupCatalog, formGroups(s, i.row), 'form-groups', { id: String(i.row) }, busy)}</div>
             <button type="button" data-action="onboard-form" data-row="${i.row}" data-email="${escapeHtml(i.email)}" ${busy ? 'disabled' : ''} ${pendingAttrs(`form:${i.row}`)} class="btn btn-primary btn-sm mt-2 min-h-[44px]">${spinnerOr(`form:${i.row}`, `Onboard ${i.newCount} ${i.newCount === 1 ? 'person' : 'people'}`)}</button>
           </li>`;
         }).join('')}
@@ -2235,20 +2239,25 @@
 
     async loadFormResponses() {
       const data = await this.run('form:load', () => Api.post('listFormResponses'));
-      if (data?.formResponses) Store.set({ formResponses: data.formResponses });
+      if (data?.formResponses) Store.set({ formResponses: data.formResponses, formGroupsDrafts: {} });
     },
 
     async onboardFormResponse(row, email) {
       const entry = Store.state.formResponses?.items.find((i) => i.row === row && i.email === email);
       if (!entry) return;
       const who = entry.newCount === 1 ? '1 person' : `${entry.newCount} people`;
-      if (!window.confirm(`Onboard ${entry.name || entry.email}? This adds ${who} as Atithi${entry.hasTravel ? '' : ' and creates their travel plan'}.`)) return;
-      const data = await this.run(`form:${row}`, () => Api.post('onboardFormResponse', { row, email }));
+      const groups = Store.state.formGroupsDrafts[row] ?? activeGroupLabels(Store.state.groupCatalog);
+      const groupNote = groups.length ? `, in ${groups.join(', ')}` : ', with no groups';
+      if (!window.confirm(`Onboard ${entry.name || entry.email}? This adds ${who} as Atithi${groupNote}${entry.hasTravel ? '' : ' and creates their travel plan'}.`)) return;
+      const data = await this.run(`form:${row}`, () => Api.post('onboardFormResponse', { row, email, groups }));
       if (!data) return;
+      const drafts = { ...Store.state.formGroupsDrafts };
+      delete drafts[row];
       Store.set({
         members: data.members,
         logistics: data.logistics,
         formResponses: data.formResponses,
+        formGroupsDrafts: drafts,
       });
       const added = data.result?.added?.length || 0;
       const warnings = data.result?.warnings?.length || 0;
@@ -2571,6 +2580,10 @@
         Store.state.memberGroupsDrafts[groupCheckbox.dataset.email] = checkedGroups(groupCheckbox.closest('fieldset'));
         return;
       }
+      if (groupCheckbox?.dataset.action === 'form-groups') {
+        Store.state.formGroupsDrafts[groupCheckbox.dataset.id] = checkedGroups(groupCheckbox.closest('fieldset'));
+        return;
+      }
       if (groupCheckbox?.dataset.action === 'broadcast-groups') {
         Store.state.broadcastDraft.groups = checkedGroups(groupCheckbox.closest('fieldset'));
         return;
@@ -2614,7 +2627,7 @@
       Store.set({ online: false });
       if (Store.state.authStatus === 'authed' && !Auth.restoreOffline()) {
         Store.set({
-          authStatus: 'offline', role: GUEST_ROLE, isAdmin: false, itinerary: [], logistics: [], members: [], formResponses: null,
+          authStatus: 'offline', role: GUEST_ROLE, isAdmin: false, itinerary: [], logistics: [], members: [], formResponses: null, formGroupsDrafts: {},
           myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {},
         });
       }

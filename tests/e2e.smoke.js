@@ -141,6 +141,7 @@ function makeBackend() {
       if (body.action === 'listFormResponses') return { ok: true, data: { formResponses: this.formResponses() } };
       if (body.action === 'onboardFormResponse') {
         this.onboarded.push(`${p.row}|${p.email}`);
+        this.onboardGroups = p.groups;
         return { ok: true, data: { result: { added: [p.email], travelId: 'G9', warnings: [] }, members, logistics, formResponses: { ...this.formResponses(), items: [] } } };
       }
       if (body.action === 'addMember') members.push({ email: p.email, role: p.role, addedBy: me, addedDate: '', tourStatus: 'Pending', groups: parseGroups(p.groups) });
@@ -757,9 +758,18 @@ async function assertTourStep(page, id, tab, target = null) {
       'sign-up shows the family, their emails and any data warnings');
     assert((await page.textContent('[data-section="form-signups"]')).includes('1 already onboarded'), 'already-onboarded sign-ups are summarised');
     assert((await page.textContent('[data-action="onboard-form"]')).includes('Onboard 3 people'), 'onboard button states how many people will be added');
+    for (const label of ['Bride Side', 'Groom Side']) {
+      await page.fill('form[data-action="add-group"] input[name="label"]', label);
+      await page.click('form[data-action="add-group"] button[type="submit"]');
+      await page.waitForSelector(`[data-section="form-signups"] input[name="groups"][value="${label}"]`);
+    }
+    const defaultChecked = await page.$$eval('[data-form-row="5"] input[name="groups"]:checked', (els) => els.map((e) => e.value));
+    assert(defaultChecked.join() === 'Bride Side,Groom Side', 'each sign-up starts with every active group ticked');
+    await page.uncheck('[data-form-row="5"] input[name="groups"][value="Bride Side"]');
     await page.click('[data-action="onboard-form"]');
     await page.waitForSelector('[data-section="form-signups"] >> text=Everyone has been onboarded');
     assert(backend.onboarded.join() === '5|rao@gmail.com', 'onboarding sends the row and primary email');
+    assert(JSON.stringify(backend.onboardGroups) === '["Groom Side"]', 'onboarding sends the groups chosen for that entry');
 
     const inviteSection = await page.$eval('[data-section="member-invite"]', (section) => {
       const style = getComputedStyle(section);

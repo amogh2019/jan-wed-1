@@ -144,3 +144,46 @@ test('formula-like names are neutralised in the sheet', () => {
   const nameCol = logistics[0].indexOf('Name');
   assert.equal(logistics[logistics.length - 1][nameCol][0], "'");
 });
+
+test('newly onboarded members get every active group; existing members and archived groups are untouched', () => {
+  const b = backend([row()], {
+    overrides: {
+      'Form Responses 1': [HEADERS, row({ email: ATITHI, family: 'a@example.com' })],
+      Groups: [['Label', 'Status'], ['Bride Side', 'Active'], ['Groom Side', 'Active'], ['Old Crew', 'Archived']],
+    },
+  });
+  const out = b.call(ADMIN, 'onboardFormResponse', { row: 2, email: ATITHI });
+  assert.equal(out.ok, true);
+  assert.deepEqual(out.data.result.added, ['a@example.com']);
+  const byEmail = Object.fromEntries(out.data.members.map((m) => [m.email, m.groups]));
+  assert.deepEqual(byEmail['a@example.com'], ['Bride Side', 'Groom Side']);
+  assert.deepEqual(byEmail[ATITHI], []);
+  assert.ok(b.audit().some((l) => l[3].includes('a@example.com') && l[3].includes('Bride Side, Groom Side')));
+});
+
+test('onboarding with no groups defined adds members with no groups', () => {
+  const out = backend([row()]).call(ADMIN, 'onboardFormResponse', { row: 2, email: 'new@example.com' });
+  assert.ok(out.data.members.filter((m) => m.email !== ADMIN).every((m) => m.groups.length === 0));
+});
+
+test('more than 10 active groups: only the first 10 are assigned, with a warning', () => {
+  const groups = Array.from({ length: 12 }, (_, i) => [`Group ${String.fromCharCode(65 + i)}`, 'Active']);
+  const b = backend([row({ family: '' })], { overrides: { 'Form Responses 1': [HEADERS, row({ family: '' })], Groups: [['Label', 'Status'], ...groups] } });
+  const out = b.call(ADMIN, 'onboardFormResponse', { row: 2, email: 'new@example.com' });
+  assert.equal(out.ok, true);
+  assert.equal(out.data.members.find((m) => m.email === 'new@example.com').groups.length, 10);
+  assert.ok(out.data.result.warnings.some((w) => w.includes('first 10 of 12')));
+});
+
+test('admin-chosen groups override the default; empty means no groups; unknown or archived groups are rejected', () => {
+  const groups = { Groups: [['Label', 'Status'], ['Bride Side', 'Active'], ['Groom Side', 'Active'], ['Old Crew', 'Archived']] };
+  const run = (sel) => {
+    const b = backend([row({ family: 'a@example.com' })], { overrides: { 'Form Responses 1': [HEADERS, row({ family: 'a@example.com' })], ...groups } });
+    return b.call(ADMIN, 'onboardFormResponse', { row: 2, email: 'new@example.com', groups: sel });
+  };
+  const picked = run(['Groom Side']);
+  assert.ok(picked.data.members.filter((m) => picked.data.result.added.includes(m.email)).every((m) => m.groups.join() === 'Groom Side'));
+  assert.ok((() => { const r = run([]); return r.data.members.filter((m) => r.data.result.added.includes(m.email)).every((m) => m.groups.length === 0); })());
+  assert.equal(run(['Nope']).code, 'BAD_REQUEST');
+  assert.equal(run(['Old Crew']).code, 'BAD_REQUEST');
+});
