@@ -151,6 +151,7 @@
       logisticsMode: 'pickup', // 'pickup' (arrivals) | 'drop' (departures)
       pickupSearch: '',
       memberSearch: '',
+      formResponses: null, // admin: sign-ups read from the Google Form tab (loaded on demand)
       openEventControls: new Set(),
       openMemberGroups: new Set(),
       tourStatus: 'Completed', // real value arrives with the session; never tour before that
@@ -223,7 +224,7 @@
         if (err.code === 'NOT_MEMBER') Auth.deny(user.email);
         // Role was downgraded server-side since the last sync: drop admin data now, then resync.
         if (err.code === 'FORBIDDEN' && /not authorized/i.test(err.message)) {
-          Store.set({ isAdmin: false, role: GUEST_ROLE, tab: 'schedule', logistics: [], members: [] });
+          Store.set({ isAdmin: false, role: GUEST_ROLE, tab: 'schedule', logistics: [], members: [], formResponses: null });
           void Auth.loadSession();
         }
         throw err;
@@ -460,7 +461,7 @@
       storage.remove(STORAGE.CREDENTIAL);
       storage.remove(STORAGE.LAST_USER);
       storage.remove(STORAGE.DATA_CACHE);
-      Store.set({ user: null, role: null, isAdmin: false, loading: false, itinerary: [], logistics: [], members: [], myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openEventControls: new Set(), openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, familyContact: null, tab: 'schedule', lastSynced: null, ...patch });
+      Store.set({ user: null, role: null, isAdmin: false, loading: false, itinerary: [], logistics: [], members: [], formResponses: null, myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openEventControls: new Set(), openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, familyContact: null, tab: 'schedule', lastSynced: null, ...patch });
     },
 
     deny(email) {
@@ -476,7 +477,7 @@
       void Push.logout();
       sessionStore.remove(STORAGE.CREDENTIAL);
       // Admin-only data must not linger on screen after the session ends.
-      Store.set({ authStatus: 'signed-out', user: null, isAdmin: false, role: null, logistics: [], members: [], myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openEventControls: new Set(), openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, loading: false, tab: 'schedule' });
+      Store.set({ authStatus: 'signed-out', user: null, isAdmin: false, role: null, logistics: [], members: [], formResponses: null, myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openEventControls: new Set(), openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, loading: false, tab: 'schedule' });
       Modal.close();
       Tour.cancel();
       this.prompt();
@@ -1684,6 +1685,39 @@
       ${contactCard}`;
   };
 
+  const formResponsesSection = (s) => {
+    const f = s.formResponses;
+    const loading = Store.isPending('form:load');
+    const loadBtn = `<button type="button" data-action="load-form-responses" ${loading ? 'disabled' : ''} ${pendingAttrs('form:load')} class="btn btn-ghost btn-sm shrink-0 min-h-[44px]">${spinnerOr('form:load', f ? 'Refresh' : 'Load sign-ups')}</button>`;
+    let body = '<p class="mt-3 text-xs text-ink-500">Load the guests who filled in the Google Form, then onboard each family in one tap.</p>';
+    if (f && !f.configured) {
+      body = `<p class="mt-3 text-xs text-ink-600">No responses tab named “${escapeHtml(f.sheet)}” was found in the Sheet.</p>`;
+    } else if (f) {
+      const hidden = f.hidden.onboarded + f.hidden.noEmail;
+      const note = hidden ? `<p class="mt-2 text-[11px] text-ink-500">${f.hidden.onboarded} already onboarded${f.hidden.noEmail ? ` · ${f.hidden.noEmail} without a valid email` : ''} hidden.</p>` : '';
+      body = f.items.length ? `${note}<ul class="mt-3 divide-y divide-haldi-100">
+        ${f.items.map((i) => {
+          const busy = Store.isPending(`form:${i.row}`);
+          const people = [i.email, ...i.familyEmails.map((e) => e.email)];
+          return `<li class="py-3" data-form-row="${i.row}">
+            <p class="text-sm font-semibold text-ink-900">${escapeHtml(i.name)}${i.members ? ` <span class="font-normal text-ink-500">· ${escapeHtml(i.members)} guest(s)</span>` : ''}</p>
+            <p class="text-xs text-ink-500 break-words">${escapeHtml(people.join(', '))}</p>
+            <p class="text-xs text-ink-400">${[i.mode, i.arrival && `Arrives ${formatDateTime(i.arrival)}`, i.departure && `Leaves ${formatDateTime(i.departure)}`].filter(Boolean).map(escapeHtml).join(' · ')}</p>
+            ${i.warnings.map((w) => `<p class="mt-1 text-[11px] text-kumkum-700">⚠ ${escapeHtml(w)}</p>`).join('')}
+            <button type="button" data-action="onboard-form" data-row="${i.row}" data-email="${escapeHtml(i.email)}" ${busy ? 'disabled' : ''} ${pendingAttrs(`form:${i.row}`)} class="btn btn-primary btn-sm mt-2 min-h-[44px]">${spinnerOr(`form:${i.row}`, `Onboard ${i.newCount} ${i.newCount === 1 ? 'person' : 'people'}`)}</button>
+          </li>`;
+        }).join('')}
+      </ul>` : `${note}${emptyState('🎉', 'Everyone has been onboarded', 'New form responses will show up here.')}`;
+    }
+    return `<section data-section="form-signups" class="card mb-4 p-4">
+      <div class="flex items-start justify-between gap-3">
+        <div><p class="eyebrow">Google Form</p><h3 class="font-display text-xl text-kumkum-700">Guest sign-ups</h3></div>
+        ${loadBtn}
+      </div>
+      ${body}
+    </section>`;
+  };
+
   Views.members = (s) => {
     const me = s.user?.email;
     const q = s.memberSearch.trim().toLowerCase();
@@ -1759,6 +1793,7 @@
           </li>`).join('')}
         </ul>` : emptyState('🏷️', 'No group labels yet', 'Add a label to make it available in member and ceremony forms.')}
       </section>
+      ${formResponsesSection(s)}
       <section data-section="member-invite" class="relative overflow-hidden rounded-3xl border-2 border-marigold-300 bg-gradient-to-br from-marigold-50 via-ivory-50 to-haldi-50 p-4 mb-4 shadow-card">
         <div class="relative flex items-start gap-3">
           <div class="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-marigold-100 text-xl" aria-hidden="true">✉️</div>
@@ -2198,6 +2233,28 @@
       }
     },
 
+    async loadFormResponses() {
+      const data = await this.run('form:load', () => Api.post('listFormResponses'));
+      if (data?.formResponses) Store.set({ formResponses: data.formResponses });
+    },
+
+    async onboardFormResponse(row, email) {
+      const entry = Store.state.formResponses?.items.find((i) => i.row === row && i.email === email);
+      if (!entry) return;
+      const who = entry.newCount === 1 ? '1 person' : `${entry.newCount} people`;
+      if (!window.confirm(`Onboard ${entry.name || entry.email}? This adds ${who} as Atithi${entry.hasTravel ? '' : ' and creates their travel plan'}.`)) return;
+      const data = await this.run(`form:${row}`, () => Api.post('onboardFormResponse', { row, email }));
+      if (!data) return;
+      Store.set({
+        members: data.members,
+        logistics: data.logistics,
+        formResponses: data.formResponses,
+      });
+      const added = data.result?.added?.length || 0;
+      const warnings = data.result?.warnings?.length || 0;
+      Toast.show(`${added} added to the guest list${warnings ? ` · ${warnings} note(s) to double-check` : ''}.`, warnings ? 'info' : 'success');
+    },
+
     async addGroup(form) {
       const input = form.querySelector('input[name="label"]');
       const submittedLabel = input.value;
@@ -2484,6 +2541,8 @@
           $('#view [data-action="member-search"]')?.focus();
           break;
         case 'archive-group': void Actions.archiveGroup(el.dataset.label); break;
+        case 'load-form-responses': void Actions.loadFormResponses(); break;
+        case 'onboard-form': void Actions.onboardFormResponse(Number(el.dataset.row), el.dataset.email); break;
         case 'clear-notifications': void Actions.clearNotifications(); break;
         case 'add-pickup': Actions.openTravelForm(); break;
         case 'edit-pickup': Actions.openEditTravel(id); break;
@@ -2555,7 +2614,7 @@
       Store.set({ online: false });
       if (Store.state.authStatus === 'authed' && !Auth.restoreOffline()) {
         Store.set({
-          authStatus: 'offline', role: GUEST_ROLE, isAdmin: false, itinerary: [], logistics: [], members: [],
+          authStatus: 'offline', role: GUEST_ROLE, isAdmin: false, itinerary: [], logistics: [], members: [], formResponses: null,
           myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {},
         });
       }

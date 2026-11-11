@@ -69,6 +69,16 @@ function makeBackend() {
     expireNext: false, failNextAction: null, failBroadcastPush: false, failEventPush: false,
     ignoreAudienceFilters: false,
     exposeNoticeMetadataToGuests: false,
+    onboarded: [],
+    formResponses() {
+      return {
+        configured: true, sheet: 'Form Responses 1', hidden: { onboarded: 1, noEmail: 0 },
+        items: [{ row: 5, email: 'rao@gmail.com', name: 'The Rao Family', members: '3', contact: '', mode: 'Flight',
+          arrival: '2027-01-20T09:00:00+05:30', departure: '', primaryIsMember: false, hasTravel: false, newCount: 3,
+          familyEmails: [{ email: 'a@gmail.com', isMember: false }, { email: 'b@gmail.com', isMember: false }],
+          warnings: ['Contact number ignored (not a valid phone number).'] }],
+      };
+    },
     handle(body) {
       this.calls += 1;
       const me = email(body.idToken);
@@ -127,6 +137,11 @@ function makeBackend() {
         if (!group) return { ok: false, code: 'NOT_FOUND', error: 'Group not found.' };
         group.status = 'Archived';
         return { ok: true, data: { groupCatalog } };
+      }
+      if (body.action === 'listFormResponses') return { ok: true, data: { formResponses: this.formResponses() } };
+      if (body.action === 'onboardFormResponse') {
+        this.onboarded.push(`${p.row}|${p.email}`);
+        return { ok: true, data: { result: { added: [p.email], travelId: 'G9', warnings: [] }, members, logistics, formResponses: { ...this.formResponses(), items: [] } } };
       }
       if (body.action === 'addMember') members.push({ email: p.email, role: p.role, addedBy: me, addedDate: '', tourStatus: 'Pending', groups: parseGroups(p.groups) });
       if (body.action === 'updateMemberRole') members.find((x) => x.email === p.email).role = p.role;
@@ -733,6 +748,19 @@ async function assertTourStep(page, id, tab, target = null) {
     assert(await page.inputValue('[data-action="member-search"]') === '', 'Clear resets member search');
     assert(await page.locator('[data-action="member-search"]').evaluate((input) => input === document.activeElement),
       'Clear returns focus to member search');
+    console.log('Admin onboards a Google Form sign-up');
+    assert(await page.isVisible('[data-section="form-signups"] [data-action="load-form-responses"]'), 'form sign-ups card offers a load button');
+    await page.click('[data-action="load-form-responses"]');
+    await page.waitForSelector('[data-form-row="5"]');
+    const formText = await page.textContent('[data-form-row="5"]');
+    assert(formText.includes('The Rao Family') && formText.includes('a@gmail.com') && formText.includes('Contact number ignored'),
+      'sign-up shows the family, their emails and any data warnings');
+    assert((await page.textContent('[data-section="form-signups"]')).includes('1 already onboarded'), 'already-onboarded sign-ups are summarised');
+    assert((await page.textContent('[data-action="onboard-form"]')).includes('Onboard 3 people'), 'onboard button states how many people will be added');
+    await page.click('[data-action="onboard-form"]');
+    await page.waitForSelector('[data-section="form-signups"] >> text=Everyone has been onboarded');
+    assert(backend.onboarded.join() === '5|rao@gmail.com', 'onboarding sends the row and primary email');
+
     const inviteSection = await page.$eval('[data-section="member-invite"]', (section) => {
       const style = getComputedStyle(section);
       return { text: section.textContent, borderWidth: style.borderTopWidth, backgroundImage: style.backgroundImage };

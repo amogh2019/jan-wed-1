@@ -452,6 +452,58 @@ var ACTIONS_ = {
     return { members: readMembers_() };
   },
 
+  /** Guest sign-ups from the Google Form tab that still have someone to onboard. */
+  listFormResponses: function () {
+    return { formResponses: listFormResponses_() };
+  },
+
+  /** Adds a form response's primary + family emails as Atithi and creates the guest's travel plan. */
+  onboardFormResponse: function (payload, user, req) {
+    var row = Number(payload.row);
+    if (!Number.isInteger(row) || row < 2) throw new AppError('BAD_REQUEST', '"row" must be a sheet row number.');
+    var email = requireEmail_(payload.email);
+
+    var form = openFormSheet_();
+    if (!form) throw new AppError('NOT_FOUND', 'The Google Form responses tab was not found.');
+    var entry = row <= form.values.length ? buildFormEntry_(form, row - 1) : null;
+    if (!entry || entry.email !== email) {
+      throw new AppError('CONFLICT', 'The form responses changed since you opened them. Please refresh and try again.');
+    }
+
+    var memberTable = readTable_(SHEETS.MEMBERS);
+    var existing = {};
+    readMembers_().forEach(function (m) { existing[m.email] = true; });
+    var toAdd = [entry.email].concat(entry.family).filter(function (e) { return !existing[e]; });
+    toAdd.forEach(function (e) {
+      appendRecord_(memberTable, { Email: e, Role: ROLES.ATITHI, AddedBy: user.email, AddedDate: new Date() });
+      writeAudit_(user.email, AUDIT_CATEGORY.ADMIN, 'Added ' + e + ' to Members as ' + ROLES.ATITHI +
+        ' from form response row ' + row, req.timestamp);
+    });
+
+    var travelId = '';
+    var hasTravel = readLogistics_().some(function (g) { return g.email === entry.email; });
+    if (!hasTravel) {
+      ensureColumns_(SHEETS.LOGISTICS, OPTIONAL_HEADERS.Logistics);
+      var table = readTable_(SHEETS.LOGISTICS);
+      travelId = nextId_(table, 'ID', DEFAULT_ID_PREFIX.Logistics);
+      var t = entry.travel;
+      appendRecord_(table, {
+        ID: travelId, Name: t.name, Members: t.members, Contact: t.contact, Email: entry.email,
+        ArrivalDateTime: t.arrival, DepartureDateTime: t.departure, Mode: t.mode,
+        PickupStatus: 'Pending', DropStatus: 'Pending',
+      });
+      writeAudit_(user.email, AUDIT_CATEGORY.LOGISTICS, 'Added ' + t.name + ' (ID ' + travelId + ') from form response row ' + row +
+        ', linked to ' + entry.email, req.timestamp);
+    }
+
+    return {
+      result: { added: toAdd, travelId: travelId, warnings: entry.warnings },
+      members: readMembers_(),
+      logistics: readLogistics_(),
+      formResponses: listFormResponses_(),
+    };
+  },
+
   /** Replaces a member's group labels (blank = no groups: they then see only ceremonies for everyone). */
   updateMemberGroups: function (payload, user, req) {
     var email = requireEmail_(payload.email, true);
@@ -651,6 +703,131 @@ function sameCell_(current, next) {
 function normalizeTour_(v) {
   var s = String(v || '').trim();
   return TOUR_STATUSES.indexOf(s) >= 0 ? s : 'Pending';
+}
+
+/* ----------------------------------------------------------------------------
+ *  Google Form responses (read-only source; onboarding copies into Members/Logistics)
+ * ------------------------------------------------------------------------- */
+
+var FORM_SHEET_DEFAULT = 'Form Responses 1';
+var FORM_MAX_ROWS = 200;
+var FORM_MAX_FAMILY = 30;
+
+/** Opens the responses tab (name overridable via the FORM_RESPONSES_SHEET script property); null if absent. */
+function openFormSheet_() {
+  var name = getProp_('FORM_RESPONSES_SHEET') || FORM_SHEET_DEFAULT;
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
+  if (!sheet) return null;
+  var values = sheet.getDataRange().getValues();
+  var cols = { email: -1, family: -1, name: -1, members: -1, contact: -1, arrival: -1, departure: -1, mode: -1 };
+  (values[0] || []).forEach(function (h, i) {
+    var k = String(h == null ? '' : h).toLowerCase().replace(/[^a-z0-9]/g, '');
+    var key = null;
+    if (k === 'emailaddress') key = 'email';
+    else if (k.indexOf('familymember') === 0) key = 'family';
+    else if (k.indexOf('nameof') === 0) key = 'name';
+    else if (k.indexOf('numberofmembers') === 0) key = 'members';
+    else if (k.indexOf('contactnumber') === 0) key = 'contact';
+    else if (k.indexOf('datetimeofarrival') === 0) key = 'arrival';
+    else if (k.indexOf('datetimeofdeparture') === 0) key = 'departure';
+    else if (k.indexOf('mode') === 0) key = 'mode';
+    if (key && cols[key] < 0) cols[key] = i;
+  });
+  if (cols.email < 0) throw new AppError('CONFIG', 'The form responses tab "' + name + '" has no "Email address" column.');
+  return { name: name, values: values, cols: cols };
+}
+
+/** dd/MM/yyyy or yyyy-MM-dd with optional HH:mm[:ss]; '' when blank, null when unreadable. */
+function parseFormDate_(cell) {
+  if (cell instanceof Date) return isNaN(cell.getTime()) ? null : cell;
+  var s = String(cell == null ? '' : cell).trim();
+  if (!s) return '';
+  var m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ T]+(\d{1,2}):(\d{2})(?::\d{2})?)?$/.exec(s);
+  var y; var mo; var d;
+  if (m) { d = Number(m[1]); mo = Number(m[2]); y = Number(m[3]); }
+  else {
+    m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T]+(\d{1,2}):(\d{2})(?::\d{2})?)?$/.exec(s);
+    if (!m) return null;
+    y = Number(m[1]); mo = Number(m[2]); d = Number(m[3]);
+  }
+  var h = Number(m[4] || 0);
+  var mi = Number(m[5] || 0);
+  var probe = new Date(Date.UTC(y, mo - 1, d));
+  if (probe.getUTCFullYear() !== y || probe.getUTCMonth() !== mo - 1 || probe.getUTCDate() !== d || h > 23 || mi > 59) return null;
+  var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+  return optionalDateTime_(y + '-' + pad(mo) + '-' + pad(d) + 'T' + pad(h) + ':' + pad(mi), 'date');
+}
+
+/** One response row → emails + lenient travel fields. Unusable travel values are blanked with a warning. */
+function buildFormEntry_(form, index) {
+  var rowValues = form.values[index];
+  var cell = function (k) { return form.cols[k] >= 0 ? rowValues[form.cols[k]] : ''; };
+  var email = normalizeEmail_(cell('email'));
+  var typedName = String(cell('name') == null ? '' : cell('name')).trim();
+  if (!email && !typedName) return null;
+  var entry = { row: index + 1, email: email, valid: email.length <= MAX_EMAIL_LEN && EMAIL_RE.test(email), family: [], warnings: [] };
+  if (!entry.valid) return entry;
+
+  var seen = {};
+  seen[email] = true;
+  String(cell('family') == null ? '' : cell('family')).split(/[,;\s]+/).forEach(function (raw) {
+    var e = normalizeEmail_(raw.replace(/^[<("']+|[>)"'.]+$/g, ''));
+    if (!e || seen[e]) return;
+    if (!(e.length <= MAX_EMAIL_LEN && EMAIL_RE.test(e))) { entry.warnings.push('Ignored "' + e.slice(0, 60) + '" (not a valid email).'); return; }
+    seen[e] = true;
+    entry.family.push(e);
+  });
+  if (entry.family.length > FORM_MAX_FAMILY) {
+    entry.warnings.push('Only the first ' + FORM_MAX_FAMILY + ' family emails are used.');
+    entry.family = entry.family.slice(0, FORM_MAX_FAMILY);
+  }
+
+  var travel = { name: typedName.slice(0, MAX_FIELD_LEN) || email, members: '', contact: '', arrival: '', departure: '', mode: '' };
+  try { travel.members = optionalCount_(cell('members'), 'members'); } catch (e) { entry.warnings.push('Number of members ignored (not 1–' + MAX_GUESTS_PER_PARTY + ').'); }
+  var contact = String(cell('contact') == null ? '' : cell('contact')).trim();
+  if (contact && CONTACT_RE.test(contact)) travel.contact = contact;
+  else if (contact) entry.warnings.push('Contact number ignored (not a valid phone number).');
+  travel.mode = String(cell('mode') == null ? '' : cell('mode')).trim().slice(0, MAX_FIELD_LEN);
+  ['arrival', 'departure'].forEach(function (k) {
+    var d = parseFormDate_(cell(k));
+    if (d === null) entry.warnings.push(k.charAt(0).toUpperCase() + k.slice(1) + ' time ignored (unreadable date).');
+    else travel[k] = d;
+  });
+  if (travel.arrival && travel.departure && travel.departure < travel.arrival) {
+    travel.departure = '';
+    entry.warnings.push('Departure ignored (before arrival).');
+  }
+  entry.travel = travel;
+  return entry;
+}
+
+/** Newest-first sign-ups that still have someone to onboard, plus counts of what was hidden. */
+function listFormResponses_() {
+  var form = openFormSheet_();
+  var out = { configured: !!form, sheet: form ? form.name : '', items: [], hidden: { onboarded: 0, noEmail: 0 } };
+  if (!form) return out;
+  var members = {};
+  readMembers_().forEach(function (m) { members[m.email] = true; });
+  var travel = {};
+  readLogistics_().forEach(function (g) { if (g.email) travel[g.email] = true; });
+
+  var stop = Math.max(1, form.values.length - FORM_MAX_ROWS);
+  for (var i = form.values.length - 1; i >= stop; i--) {
+    var entry = buildFormEntry_(form, i);
+    if (!entry) continue;
+    if (!entry.valid) { out.hidden.noEmail += 1; continue; }
+    var newCount = [entry.email].concat(entry.family).filter(function (e) { return !members[e]; }).length;
+    if (!newCount) { out.hidden.onboarded += 1; continue; }
+    out.items.push({
+      row: entry.row, email: entry.email, name: entry.travel.name, members: String(entry.travel.members),
+      contact: entry.travel.contact, mode: entry.travel.mode,
+      arrival: formatDateTime_(entry.travel.arrival), departure: formatDateTime_(entry.travel.departure),
+      primaryIsMember: !!members[entry.email], hasTravel: !!travel[entry.email], newCount: newCount,
+      familyEmails: entry.family.map(function (e) { return { email: e, isMember: !!members[e] }; }),
+      warnings: entry.warnings,
+    });
+  }
+  return out;
 }
 
 /* ----------------------------------------------------------------------------

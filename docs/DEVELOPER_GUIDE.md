@@ -43,6 +43,7 @@ Tab names and required columns (exact header text; case/space differences are to
 | `AuditLog` | Timestamp, UserEmail, ActionCategory, Details | |
 | `Notifications` | Timestamp, Title, Message, EventID, Groups, SentBy, PushStatus (created by `setup()`; one row per app announcement) | |
 | `Groups` | Label, Status (`Active`/`Archived`; created by `setup()`) | |
+| `Form Responses 1` | Google Form's own response tab (**read-only**; never written or reshaped by the app). Columns matched by header text: `Email address`, `Name of the Family / Person`, `Number of Members`, `Contact Number`, `Date Time of Arrival`, `Date Time of Departure`, `Mode of Transport`, `Family Member's Email Addresses`. Tab name overridable with Script Property `FORM_RESPONSES_SHEET`. | |
 
 - Required columns: defined in `HEADERS` in Code.gs. Optional: `OPTIONAL_HEADERS`. Defaults for blanks: `BACKFILL`.
 - The legacy `Admins` tab (from v1) is migrated into `Members` by `setup()` **only if Members is empty**.
@@ -82,6 +83,8 @@ Every request: body size cap → local ID-token precheck → Google tokeninfo ve
 | `deleteEvent` | Admin | Delete an itinerary row: `eventId` required, `title` optional but sent by the app (must match, else `CONFLICT`, so a stale screen can't delete a renumbered event). Numeric IDs of rows **below** shift down by one (deleting 3: 4→3, 5→4) so the next `addEvent` continues the sequence. If a shift would collide with an ID that stays (hand-edited, out-of-order sheet), the row is deleted and no IDs change. Older AuditLog lines keep the old IDs, and the deletion audit line lists every `from→to`. | Event |
 | `addPickup` | Admin | Append a Logistics row: `name` required; `members` (1–500), `contact` (phone chars), `arrival`/`departure` (`yyyy-MM-ddTHH:mm`, sheet time zone, departure ≥ arrival), `mode`, `email`, `pickupStatus` optional. Next ID keeps the prefix (`G7` → `G8`). | Logistics |
 | `addMember` | Admin | Add email with role (`Admin`/`Atithi`; `Viewer` accepted and stored as `Atithi`) and optional selected `groups`. Groups must be in the active catalog. | Admin Management |
+| `listFormResponses` | Admin | Newest-first (last 200 rows) form sign-ups that still have at least one email not in `Members`, with counts of hidden (already onboarded / no valid email) rows. Reports `configured:false` if the tab is missing. | — |
+| `onboardFormResponse` | Admin | `row` (sheet row) + `email` (primary email, checked against that row, else `CONFLICT`). Adds the primary and every family email (comma/semicolon/space separated, validated, deduplicated, max 30) as `Atithi`, skipping existing members, and creates a Logistics row (Pending pick-up/drop, linked by Email) unless one already exists for that email. Dates accept `dd/MM/yyyy[ HH:mm]`, ISO, or sheet dates; unusable numbers/phones/dates are blanked and returned as `warnings` rather than failing. Idempotent. Returns `result`, `members`, `logistics`, `formResponses`. | Admin Management + Logistics |
 | `updateMemberGroups` | Admin | Replace a member's group labels. Labels are case-insensitive for matching; up to 10 labels, 30 characters each. Existing archived assignments may be retained or removed, but cannot be newly assigned. | Admin Management |
 | `addGroup` / `archiveGroup` | Admin | Add a label or archive an active label. Labels cannot be renamed; archiving preserves existing assignments and removes the label from new-assignment pickers. | Admin Management |
 | `updateMemberRole` | Admin | Change role (can't change own; can't remove last admin). | Admin Management |
@@ -194,6 +197,7 @@ Do these in order (each step is reversible until the last):
 
 ## 11. Changelog
 
+- **v1.7.15** Members & Access gained a **Guest sign-ups** card: admins load Google Form responses (read-only `Form Responses 1` tab) and onboard a whole family in one tap — primary + family emails become Atithi members and a travel plan is created, with data warnings shown and every write audited. New actions `listFormResponses` / `onboardFormResponse`; no sheet schema change.
 - **v1.7.14** Notifications view now sorts announcements by timestamp, newest first and oldest last, regardless of backend row order. No backend change.
 - **v1.7.13** Rebuilt the Tailwind stylesheet so expanded Event Control actions apply their intended left/right spacing instead of touching the card edges.
 - **v1.7.12** Event Control ceremonies now use collapsed cards that retain essential schedule, audience, and status details while hiding actions until expanded; open cards survive rerenders. PWA update checks now reuse the combined OneSignal registration and suppress all fresh-install controller changes, preventing recurring false update/reload cycles.

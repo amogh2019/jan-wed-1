@@ -72,7 +72,7 @@ test('admin session includes logistics and members', () => {
 
 test('viewers cannot run admin actions and the attempt is audited', () => {
   const b = withViewer();
-  for (const action of ['updateEvent', 'updatePickup', 'addEvent', 'addPickup', 'addMember', 'updateMemberRole', 'removeMember', 'addAdmin', 'deleteEvent', 'updateMemberGroups', 'updateEventGroup']) {
+  for (const action of ['updateEvent', 'updatePickup', 'addEvent', 'addPickup', 'addMember', 'updateMemberRole', 'removeMember', 'addAdmin', 'deleteEvent', 'updateMemberGroups', 'updateEventGroup', 'listFormResponses', 'onboardFormResponse']) {
     assert.equal(b.call(VIEWER, action, { eventId: '1', status: 'Live', email: 'x@example.com' }).code, 'FORBIDDEN');
   }
   assert.ok(b.audit().every((r) => r[2] === 'Security' && r[1] === VIEWER));
