@@ -1719,7 +1719,7 @@
         }).join('')}
       </ul>` : `${note}${emptyState('🎉', 'Everyone has been onboarded', 'New form responses will show up here.')}`;
     }
-    return `<section data-section="form-signups" class="card mb-4 p-4">
+    return `<section data-section="form-signups" class="relative overflow-hidden rounded-3xl border-2 border-marigold-300 bg-gradient-to-br from-marigold-50 via-ivory-50 to-haldi-50 p-4 shadow-card mb-4">
       <div class="flex items-start justify-between gap-3">
         <div><p class="eyebrow">Google Form</p><h3 class="font-display text-xl text-kumkum-700">Guest sign-ups</h3></div>
         ${loadBtn}
@@ -1851,13 +1851,11 @@
     const filter = s.isAdmin ? s.noticeFilter : 'all';
     const matchesFilter = (n) => (filter === 'notes' ? !n.eventId : filter !== 'events' || !!n.eventId);
     const items = all.filter(matchesFilter);
-    const failed = s.isAdmin ? all.filter((n) => String(n.pushStatus || '').startsWith('Failed')).length : 0;
     const count = (key) => all.filter((n) => (key === 'notes' ? !n.eventId : key !== 'events' || !!n.eventId)).length;
     const adminBar = s.isAdmin && all.length ? `
       <div class="mb-3 flex gap-2 overflow-x-auto no-scrollbar" role="group" aria-label="Filter notices">
         ${NOTICE_FILTERS.map(([key, label]) => `<button type="button" data-action="notice-filter" data-value="${key}" aria-pressed="${filter === key}"
           class="${filter === key ? 'chip-on' : 'chip-off'} min-h-[44px] shrink-0">${label} · ${count(key)}</button>`).join('')}
-        ${failed ? `<span class="chip shrink-0 self-center bg-rose-50 text-rose-700 ring-1 ring-rose-200">⚠️ ${failed} push failed</span>` : ''}
       </div>` : '';
     const emptyText = s.isAdmin
       ? (all.length ? 'Nothing in this filter yet.' : 'Tap 📣 Announce to send your first note to guests.')
@@ -1878,7 +1876,7 @@
               <h3 class="font-semibold text-kumkum-800">${escapeHtml(n.title)}</h3>
               <p class="mt-1 text-sm text-ink-700">${escapeHtml(n.message)}</p>
               <p class="mt-2 text-xs text-ink-400">${escapeHtml(formatDateTime(n.at))}${n.groups?.length ? ` · ${escapeHtml(n.groups.join(', '))}` : ' · Everyone'}</p>
-              ${s.isAdmin ? `<p class="mt-1 text-[11px] text-ink-500">By ${escapeHtml(n.sentBy || '—')} · ${escapeHtml(n.pushStatus && n.pushStatus.startsWith('Failed')  ? 'Failed' : (n.pushStatus || 'Not sent'))}</p>` : ''}
+              ${s.isAdmin ? `<p class="mt-1 text-[11px] text-ink-500">By ${escapeHtml(n.sentBy || '—')}${String(n.pushStatus || '').startsWith('Failed') ? '' : ` · ${escapeHtml(n.pushStatus || 'Not sent')}`}</p>` : ''}
             </div>
             <span class="text-2xl" aria-hidden="true">${n.eventId ? '🪔' : '🔔'}</span>
           </div>
@@ -1934,7 +1932,7 @@
       const rooms = Object.keys(byStay[stay]).sort(naturalSort).filter((room) => matches(stay, room, byStay[stay][room]));
       if (!rooms.length) return '';
       return `
-        <section class="mb-4" data-stay-section="${escapeHtml(stay)}">
+        <section class="relative overflow-hidden rounded-3xl border-2 border-marigold-300 bg-gradient-to-br from-marigold-50 via-ivory-50 to-haldi-50 p-4 shadow-card mb-4" data-stay-section="${escapeHtml(stay)}">
           <h3 class="mb-2 flex items-center justify-between gap-2 font-display text-lg text-kumkum-700">
             <span class="truncate">🏨 ${escapeHtml(stay)}</span>
             <span class="shrink-0 text-xs font-sans font-semibold text-ink-500">${rooms.length} room${rooms.length === 1 ? '' : 's'}</span>
@@ -1977,15 +1975,15 @@
         <input type="search" data-action="room-search" value="${escapeHtml(s.roomSearch)}" placeholder="Search room, place or email…" aria-label="Search rooms" class="input min-h-[48px] pl-10" />
       </div>
       ${staySections || emptyState('🛏️', assigned ? 'No matching rooms' : 'No rooms assigned yet', assigned ? '' : 'Use “Assign a room” to place members in rooms.')}
-      ${unassigned.length ? `<details data-unassigned class="card mb-4 px-4" ${q ? 'open' : ''}>
-        <summary class="min-h-[48px] cursor-pointer py-3 text-sm font-semibold text-ink-700">Without a room · ${unassigned.length}</summary>
+      ${unassigned.length ? `<section data-unassigned class="card mb-4 px-4">
+        <h3 class="flex min-h-[48px] items-center py-3 text-sm font-semibold text-ink-700">Without a room · ${unassigned.length}</h3>
         <ul class="divide-y divide-haldi-100 border-t border-haldi-100 pb-2">
           ${filteredUnassigned.map((m) => `<li class="flex min-h-[48px] items-center justify-between gap-2 py-2">
             <span class="min-w-0 truncate text-sm text-ink-800">${escapeHtml(m.email)}</span>
             <button type="button" data-action="open-assign-room" data-email="${escapeHtml(m.email)}" ${activeStays.length ? '' : 'disabled'} class="btn btn-ghost btn-sm shrink-0 min-h-[44px]" aria-label="Assign a room to ${escapeHtml(m.email)}">Assign</button>
           </li>`).join('') || '<li class="py-3 text-xs text-ink-500">No matching members.</li>'}
         </ul>
-      </details>` : ''}`;
+      </section>` : ''}`;
   };
 
   /* --------------------------------------------------------------- Render */
@@ -2087,7 +2085,6 @@
       const input = $(`form[data-action="${form}"] input[name="label"]`);
       return input ? { form, value: input.value, focused: active === input } : null;
     }).filter(Boolean);
-    const unassignedOpen = $('[data-unassigned]')?.open;
     $$('[data-member-groups]').forEach((details) => {
       if (details.open) s.openMemberGroups.add(details.dataset.email);
       else s.openMemberGroups.delete(details.dataset.email);
@@ -2120,8 +2117,6 @@
       input.value = d.value;
       if (d.focused) input.focus();
     });
-    const unassigned = $('[data-unassigned]');
-    if (unassigned && unassignedOpen) unassigned.open = true;
     if (['pickup-search', 'member-search', 'room-search'].includes(focusKey)) {
       const el = $(`[data-action="${focusKey}"]`);
       if (el) { el.focus(); if (caret !== null) el.setSelectionRange(caret, caret); }

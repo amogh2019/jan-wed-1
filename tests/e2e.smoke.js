@@ -403,6 +403,11 @@ async function assertTourStep(page, id, tab, target = null) {
     await broadcastPage.waitForSelector('#toast-root >> text=Broadcast sent');
     await broadcastPage.waitForSelector('#modal-root #broadcast-title', { state: 'detached' });
     broadcastBackend.delayMs = 0;
+    broadcastBackend.notifications[0].pushStatus = 'Failed: Simulated OneSignal failure.';
+    await broadcastPage.click('[data-tab="control"]');
+    await broadcastPage.click('[data-tab="notifications"]');
+    await broadcastPage.waitForSelector('#view article');
+    assert(!/failed/i.test(await broadcastPage.textContent('#view')), 'admins never see push failures on Notices');
     assert(broadcastBackend.broadcastRequests[0].email === 'admin@gmail.com' &&
       broadcastBackend.broadcastRequests[0].title === 'Audience update' &&
       broadcastBackend.broadcastRequests[0].body === 'Please use the east entrance.' &&
@@ -523,6 +528,8 @@ async function assertTourStep(page, id, tab, target = null) {
     await roomPage.waitForSelector('#modal-root [data-room="clear"][data-email="beta@gmail.com"]', { state: 'detached' });
     assert((await roomPage.textContent('#modal-root')).includes('1 guest staying here'), 'room details refresh after removing a guest');
     await roomPage.click('#modal-root [data-modal="cancel"]');
+    assert(await roomPage.isVisible('[data-unassigned] [data-action="open-assign-room"][data-email]'), 'members without a room are listed without expanding anything');
+    assert(await roomPage.isVisible('[data-stay-section="Hotel Leela"].border-2'), 'each place of stay sits in its own highlighted box');
     await roomPage.fill('[data-action="room-search"]', 'no-such-room');
     await roomPage.waitForSelector('#view >> text=No matching rooms');
     assert(roomBackend.audit.length === 3, 'every room mutation reaches the audited admin backend');
