@@ -560,7 +560,7 @@ async function assertTourStep(page, id, tab, target = null) {
       return !unassigned || !!(unassigned.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING);
     }), 'the admin My Room card sits after the Without a room section');
     const roomCardText = await roomAdminPage.textContent('[data-my-room-card]');
-    assert(roomCardText.includes('My Place of Stay') && !roomCardText.includes('Need help'), 'room card is labelled My Place of Stay without the help line');
+    assert(roomCardText.includes('My Place of Stay') && !roomCardText.includes('Need help'), 'admin room card is labelled My Place of Stay without the help line');
     assert((await roomAdminPage.textContent('[data-tab="rooms"]')).trim() === 'Rooms', 'admins keep the Rooms tab label');
     await roomAdminPage.close();
 
@@ -572,6 +572,8 @@ async function assertTourStep(page, id, tab, target = null) {
     await roomGuestPage.click('[data-tab="rooms"]');
     assert((await roomGuestPage.textContent('[data-tab="rooms"]')).trim() === 'My Room', 'Atithis see the tab as My Room');
     assert((await roomGuestPage.textContent('#view h2, #view h1')).includes('My Room'), 'Atithi room page is titled My Room');
+    const guestCardText = await roomGuestPage.textContent('[data-my-room-card]');
+    assert(guestCardText.includes('Need help with your room') && !guestCardText.includes('My Place of Stay'), 'Atithis see Place of Stay and the help line');
     assert(await roomGuestPage.textContent('#view [data-my-room]') === '204', 'guest sees their own room number');
     assert((await roomGuestPage.textContent('#view')).includes('Hotel Leela') && !(await roomGuestPage.textContent('#view')).includes('beta@gmail.com'),
       'guest sees their place of stay but not other occupants');

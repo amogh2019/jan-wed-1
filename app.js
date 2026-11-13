@@ -1905,17 +1905,18 @@
 
   Views.rooms = (s) => (s.isAdmin ? adminRoomsView(s) : guestRoomView(s));
 
-  const myRoomCard = (r) => `<section class="card relative overflow-hidden p-5 text-center mb-4" data-my-room-card>
+  const myRoomCard = (r, isGuest = false) => `<section class="card relative overflow-hidden p-5 text-center mb-4" data-my-room-card>
         <div class="toran absolute inset-x-0 top-0" aria-hidden="true"></div>
-        <p class="eyebrow mt-2">My Place of Stay</p>
+        <p class="eyebrow mt-2">${isGuest ? 'Place of Stay' : 'My Place of Stay'}</p>
         <p class="font-display text-2xl text-kumkum-700">${escapeHtml(r.stay || 'To be confirmed')}</p>
         <p class="eyebrow mt-4">Room</p>
         <p class="font-display text-5xl text-kumkum-800" data-my-room>${escapeHtml(r.room)}</p>
+        ${isGuest ? '<p class="mt-4 text-sm text-ink-600">Need help with your room? Please reach out to the family.</p>' : ''}
       </section>`;
 
   const guestRoomView = (s) => `
       ${pageHeader('Your stay', 'My Room', 'Where you are staying during the celebration.', 'rooms-overview')}
-      ${s.myRoom ? myRoomCard(s.myRoom) : emptyState('🏨', 'No room assigned yet', 'Your room will appear here once the family assigns it.')}`;
+      ${s.myRoom ? myRoomCard(s.myRoom, true) : emptyState('🏨', 'No room assigned yet', 'Your room will appear here once the family assigns it.')}`;
 
   const adminRoomsView = (s) => {
     const q = s.roomSearch.trim().toLowerCase();
