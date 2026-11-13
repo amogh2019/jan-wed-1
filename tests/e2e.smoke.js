@@ -530,6 +530,14 @@ async function assertTourStep(page, id, tab, target = null) {
     await roomPage.click('#modal-root [data-modal="cancel"]');
     assert(await roomPage.isVisible('[data-unassigned] [data-action="open-assign-room"][data-email]'), 'members without a room are listed without expanding anything');
     assert(await roomPage.isVisible('[data-stay-section="Hotel Leela"].border-2'), 'each place of stay sits in its own highlighted box');
+    assert(await roomPage.isVisible('[data-stay-manager] form[data-action="add-stay"]'), 'places of stay manager is open while none exist and after the first is added');
+    await roomPage.click('[data-stay-manager] summary');
+    assert(await roomPage.isHidden('[data-stay-manager] form[data-action="add-stay"]'), 'places of stay manager collapses from its header');
+    await roomPage.fill('[data-action="room-search"]', 'Hotel');
+    assert(await roomPage.isHidden('[data-stay-manager] form[data-action="add-stay"]'), 'collapsed manager stays collapsed across refreshes');
+    assert(await roomPage.isVisible('[data-stay-section="Hotel Leela"] [data-action="open-room"]'), 'rooms stay visible while the manager is collapsed');
+    await roomPage.click('[data-stay-manager] summary');
+    assert(await roomPage.isVisible('[data-stay-manager] form[data-action="add-stay"]'), 'places of stay manager expands again');
     await roomPage.fill('[data-action="room-search"]', 'no-such-room');
     await roomPage.waitForSelector('#view >> text=No matching rooms');
     assert(roomBackend.audit.length === 3, 'every room mutation reaches the audited admin backend');

@@ -201,6 +201,7 @@ Do these in order (each step is reversible until the last):
 
 ## 11. Changelog
 
+- **v1.8.2** Rooms: the “Places of stay” label/add card at the top is collapsible (▾ header showing how many are added). It starts open only while no place exists and keeps its state across refreshes. Cache `v1.8.2`.
 - **v1.8.1** Rooms: places of stay and Google Form sign-ups get the highlighted card style; “Without a room” is always expanded. Admin Notices no longer show push-failure chips or per-notice “Failed” text (the failure is still stored in the sheet). Cache `v1.8.1`.
 - **v1.8.0** The admin Broadcast tab is replaced by a floating **📣 Announce** button on Notifications (composer opens in a modal; draft kept). Admin Notifications gain an All/Notes/Event alerts filter. New **Rooms** tab: a `Stays` place-of-stay registry plus optional `Stay`/`Room` columns on `Members` (non-destructive; `setup()` adds them). Admins assign several members to one room at once, move or remove occupants and search rooms; guests see only their own room. New audited actions `addStay`, `archiveStay`, `assignRoom`, `clearRoom` (category `Rooms`); session adds `myRoom` (+ `stayCatalog` for admins).
 - **v1.7.16** Guest sign-up onboarding assigns newly added members to every Active group by default. Each sign-up has an "Add to groups" picker (all Active groups ticked) the admin can trim before onboarding; existing members' groups are untouched and archived groups are never assigned. The confirm prompt lists the groups.

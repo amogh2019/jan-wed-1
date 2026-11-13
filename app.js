@@ -157,6 +157,7 @@
       memberSearch: '',
       formResponses: null, formGroupsDrafts: {}, // admin: sign-ups read from the Google Form tab (loaded on demand)
       openEventControls: new Set(),
+      stayManagerOpen: false,
       openMemberGroups: new Set(),
       tourStatus: 'Completed', // real value arrives with the session; never tour before that
       pending: new Set(), // keys of in-flight admin actions
@@ -467,7 +468,7 @@
       storage.remove(STORAGE.CREDENTIAL);
       storage.remove(STORAGE.LAST_USER);
       storage.remove(STORAGE.DATA_CACHE);
-      Store.set({ user: null, role: null, isAdmin: false, loading: false, itinerary: [], logistics: [], members: [], formResponses: null, formGroupsDrafts: {}, myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], stayCatalog: [], myRoom: null, roomSearch: '', pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openEventControls: new Set(), openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, familyContact: null, tab: 'schedule', lastSynced: null, ...patch });
+      Store.set({ user: null, role: null, isAdmin: false, loading: false, itinerary: [], logistics: [], members: [], formResponses: null, formGroupsDrafts: {}, myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], stayCatalog: [], myRoom: null, roomSearch: '', pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openEventControls: new Set(), stayManagerOpen: false, openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, familyContact: null, tab: 'schedule', lastSynced: null, ...patch });
     },
 
     deny(email) {
@@ -483,7 +484,7 @@
       void Push.logout();
       sessionStore.remove(STORAGE.CREDENTIAL);
       // Admin-only data must not linger on screen after the session ends.
-      Store.set({ authStatus: 'signed-out', user: null, isAdmin: false, role: null, logistics: [], members: [], formResponses: null, formGroupsDrafts: {}, myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], stayCatalog: [], myRoom: null, roomSearch: '', pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openEventControls: new Set(), openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, loading: false, tab: 'schedule' });
+      Store.set({ authStatus: 'signed-out', user: null, isAdmin: false, role: null, logistics: [], members: [], formResponses: null, formGroupsDrafts: {}, myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], stayCatalog: [], myRoom: null, roomSearch: '', pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openEventControls: new Set(), stayManagerOpen: false, openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, loading: false, tab: 'schedule' });
       Modal.close();
       Tour.cancel();
       this.prompt();
@@ -1955,9 +1956,16 @@
     return `
       ${pageHeader('Stay & rooms', 'Rooms', 'Add places of stay, then assign members to rooms. Several members can share a room. Every change is recorded in the AuditLog.', 'rooms-overview')}
       <div class="grid grid-cols-3 gap-2 text-center mb-4">${stat(roomCount, 'Rooms')}${stat(assigned, 'Assigned')}${stat(unassigned.length, 'Unassigned')}</div>
-      <section class="card p-4 mb-4">
-        <h3 class="font-display text-xl text-kumkum-700">Places of stay</h3>
-        <p class="mt-1 text-xs text-ink-500">Hotels, homes or guest houses. Archiving keeps current rooms but prevents new assignments.</p>
+      <details data-stay-manager ${s.stayManagerOpen || !s.stayCatalog.length ? 'open' : ''} class="group card mb-4 p-0">
+        <summary class="flex min-h-[56px] cursor-pointer list-none items-center justify-between gap-2 p-4">
+          <span class="font-display text-xl text-kumkum-700">Places of stay</span>
+          <span class="flex shrink-0 items-center gap-2 text-xs font-semibold text-ink-500">
+            ${s.stayCatalog.length} added
+            <span class="transition-transform group-open:rotate-180" aria-hidden="true">▾</span>
+          </span>
+        </summary>
+        <div class="px-4 pb-4">
+        <p class="text-xs text-ink-500">Hotels, homes or guest houses. Archiving keeps current rooms but prevents new assignments.</p>
         <form data-action="add-stay" class="mt-3 flex gap-2" novalidate>
           <input name="label" maxlength="30" required placeholder="e.g. Hotel Leela" aria-label="New place of stay" class="input min-w-0" />
           <button type="submit" ${Store.isPending('stay:add') ? 'disabled' : ''} ${pendingAttrs('stay:add')} class="btn btn-primary shrink-0">${spinnerOr('stay:add', 'Add')}</button>
@@ -1968,7 +1976,8 @@
             ${stay.status === 'Active' ? `<button type="button" data-action="archive-stay" data-label="${escapeHtml(stay.label)}" ${Store.isPending(`stay:${stay.label}`) ? 'disabled' : ''} ${pendingAttrs(`stay:${stay.label}`)} class="btn btn-ghost btn-sm min-h-[44px]">${spinnerOr(`stay:${stay.label}`, 'Archive')}</button>` : ''}
           </li>`).join('')}
         </ul>` : emptyState('🏨', 'No places of stay yet', 'Add one to start assigning rooms.')}
-      </section>
+        </div>
+      </details>
       <button type="button" data-action="open-assign-room" ${activeStays.length && s.members.length ? '' : 'disabled'} class="btn btn-primary w-full min-h-[48px] mb-4">🛏️ Assign a room</button>
       <div class="relative mb-4">
         <span class="pointer-events-none absolute inset-y-0 left-3 grid place-items-center text-ink-400" aria-hidden="true">⌕</span>
@@ -2089,6 +2098,8 @@
       if (details.open) s.openMemberGroups.add(details.dataset.email);
       else s.openMemberGroups.delete(details.dataset.email);
     });
+    const stayManager = $('[data-stay-manager]');
+    if (stayManager) s.stayManagerOpen = stayManager.open;
     $$('[data-event-control]').forEach((details) => {
       if (details.open) s.openEventControls.add(details.dataset.id);
       else s.openEventControls.delete(details.dataset.id);
