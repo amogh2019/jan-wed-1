@@ -57,6 +57,7 @@ function makeBackend() {
   const itinerary = [{ id: '1', day: 'Fri', time: '10:00', title: 'Welcome', location: 'Hall',
     mapLink: 'https://maps.app.goo.gl/welcome123', status: 'Upcoming', groups: [] }];
   const groupCatalog = [];
+  const stayCatalog = [];
   const logistics = [{ id: 'G1', name: 'Verma family', members: '3', contact: '+91 98765 43210', email: 'viewer@gmail.com',
     arrival: '2027-01-22T14:30:00+05:30', departure: '', mode: 'Train', pickupStatus: 'Pending', dropStatus: 'Pending' }];
   const familyContact = { name: 'Kaus', phone: '+91 90000 00000' };
@@ -65,7 +66,7 @@ function makeBackend() {
   const clearedNotifications = new Map();
   const email = (tok) => JSON.parse(Buffer.from(tok.split('.')[1], 'base64url').toString()).email;
   return {
-    audit, members, itinerary, logistics, notifications, groupCatalog, calls: 0, tourCalls: [], broadcastRequests: [],
+    audit, members, itinerary, logistics, notifications, groupCatalog, stayCatalog, roomRequests: [], calls: 0, tourCalls: [], broadcastRequests: [],
     expireNext: false, failNextAction: null, failBroadcastPush: false, failEventPush: false,
     ignoreAudienceFilters: false,
     exposeNoticeMetadataToGuests: false,
@@ -99,6 +100,8 @@ function makeBackend() {
         return { ok: true, data: { email: me, name: me, role: m.role, isAdmin, tourStatus: m.tourStatus,
           groups: myGroups, knownGroups: [...new Set(members.flatMap((x) => x.groups || []).concat(itinerary.flatMap((x) => x.groups || [])))],
           groupCatalog: isAdmin ? groupCatalog : undefined,
+          stayCatalog: isAdmin ? stayCatalog : undefined,
+          myRoom: m.room ? { stay: m.stay || '', room: m.room } : null,
           itinerary: isAdmin || this.ignoreAudienceFilters ? itinerary : itinerary.filter((e) => matching(e.groups)),
           notifications: isAdmin || this.exposeNoticeMetadataToGuests
             ? visibleNotifications
@@ -137,6 +140,26 @@ function makeBackend() {
         if (!group) return { ok: false, code: 'NOT_FOUND', error: 'Group not found.' };
         group.status = 'Archived';
         return { ok: true, data: { groupCatalog } };
+      }
+      if (body.action === 'addStay') {
+        if (stayCatalog.some((x) => x.label.toLowerCase() === p.label.toLowerCase())) return { ok: false, code: 'CONFLICT', error: 'Place of stay already exists.' };
+        stayCatalog.push({ label: p.label, status: 'Active' });
+        return { ok: true, data: { stayCatalog } };
+      }
+      if (body.action === 'archiveStay') {
+        const stay = stayCatalog.find((x) => x.label.toLowerCase() === p.label.toLowerCase());
+        if (!stay) return { ok: false, code: 'NOT_FOUND', error: 'Place of stay not found.' };
+        stay.status = 'Archived';
+        return { ok: true, data: { stayCatalog } };
+      }
+      if (body.action === 'assignRoom') {
+        this.roomRequests.push(p);
+        p.emails.forEach((e) => Object.assign(members.find((x) => x.email === e), { stay: p.stay, room: p.room }));
+        return { ok: true, data: { members } };
+      }
+      if (body.action === 'clearRoom') {
+        Object.assign(members.find((x) => x.email === p.email), { stay: '', room: '' });
+        return { ok: true, data: { members } };
       }
       if (body.action === 'listFormResponses') return { ok: true, data: { formResponses: this.formResponses() } };
       if (body.action === 'onboardFormResponse') {
@@ -305,10 +328,11 @@ async function assertTourStep(page, id, tab, target = null) {
       ['schedule', 'schedule', '#view [data-tour="schedule-overview"]'],
       ['schedule-days', 'schedule'],
       ['notifications', 'notifications', '#view [data-tour="notifications-overview"]'],
+      ['announce', 'notifications', '#view [data-tour="announce-fab"]'],
       ['event-control', 'control', '#view [data-tour="event-control"]'],
-      ['broadcast', 'broadcast', '#view [data-tour="broadcast-overview"]'],
       ['pick-drop', 'pickups', '#view [data-tour="pick-drop-overview"]'],
       ['members', 'members', '#view [data-tour="members-overview"]'],
+      ['rooms', 'rooms', '#view [data-tour="rooms-overview"]'],
       ['notify', 'schedule'],
       ['profile', 'schedule', '#account-btn'],
       ['summary', 'schedule'],
@@ -317,7 +341,8 @@ async function assertTourStep(page, id, tab, target = null) {
       await assertTourStep(adminTourPage, id, tab, target);
       if (id === 'notifications') assert(await adminTourPage.isVisible('text=No announcements yet'), 'empty notifications screen remains explained');
       if (id === 'event-control') assert(await adminTourPage.isVisible('text=No ceremonies yet'), 'empty Event Control screen remains explained');
-      if (id === 'broadcast') assert(await adminTourPage.isVisible('text=No groups selected means everyone'), 'Broadcast tour explains its default audience');
+      if (id === 'announce') assert(await adminTourPage.isVisible('text=Tap 📣 Announce to send your first note'), 'Announce tour step explains the empty notices screen');
+      if (id === 'rooms') assert(await adminTourPage.isVisible('text=No places of stay yet'), 'empty Rooms screen remains explained');
       if (id === 'pick-drop') assert(await adminTourPage.isVisible('text=No travel plans yet'), 'empty Pick & Drop screen remains explained');
       if (id === 'members') assert(await adminTourPage.isVisible('text=No group labels yet'), 'empty group catalog remains explained');
       if (i < adminTourSteps.length - 1) await adminTourPage.click('[data-tour="next"]');
@@ -331,10 +356,7 @@ async function assertTourStep(page, id, tab, target = null) {
     await adminTourPage.click('#account-btn');
     await adminTourPage.click('[data-modal="tour"]');
     await adminTourPage.waitForSelector('#tour-root');
-    await adminTourPage.click('[data-tour="next"]');
-    await adminTourPage.click('[data-tour="next"]');
-    await adminTourPage.click('[data-tour="next"]');
-    await adminTourPage.click('[data-tour="next"]');
+    for (let i = 0; i < 5; i++) await adminTourPage.click('[data-tour="next"]');
     await assertTourStep(adminTourPage, 'event-control', 'control', '#view [data-tour="event-control"]');
     await adminTourPage.click('[data-tour="skip"]');
     await adminTourPage.waitForSelector('#tour-root', { state: 'detached' });
@@ -358,10 +380,18 @@ async function assertTourStep(page, id, tab, target = null) {
     await broadcastPage.waitForSelector('#fake-gsi');
     await signIn(broadcastPage, 'admin@gmail.com');
     await enter(broadcastPage);
-    await broadcastPage.waitForSelector('[data-tab="broadcast"]:not(.hidden)');
-    await broadcastPage.click('[data-tab="broadcast"]');
-    await broadcastPage.waitForSelector('#broadcast-title');
-    assert(await visible(broadcastPage, '[data-tab="broadcast"]'), 'Admin can open the Broadcast tab');
+    const openComposer = async () => {
+      await broadcastPage.click('[data-action="open-composer"]');
+      await broadcastPage.waitForSelector('#modal-root #broadcast-title');
+    };
+    await broadcastPage.click('[data-tab="notifications"]');
+    await broadcastPage.waitForSelector('[data-action="open-composer"]');
+    await openComposer();
+    await broadcastPage.fill('#broadcast-title', 'Draft survives');
+    await broadcastPage.click('#modal-root [data-modal="cancel"]');
+    await broadcastPage.waitForSelector('[data-action="open-composer"] >> text=Draft');
+    await openComposer();
+    assert(await broadcastPage.inputValue('#broadcast-title') === 'Draft survives', 'closing the composer keeps the draft');
     broadcastBackend.delayMs = 500;
     await broadcastPage.fill('#broadcast-title', 'Audience update');
     await broadcastPage.fill('#broadcast-body', 'Please use the east entrance.');
@@ -371,6 +401,7 @@ async function assertTourStep(page, id, tab, target = null) {
     await broadcastPage.waitForSelector('[data-action="broadcast-send"] .spinner');
     assert(await broadcastPage.isDisabled('[data-action="broadcast-send"]'), 'Broadcast button disables while the request is pending');
     await broadcastPage.waitForSelector('#toast-root >> text=Broadcast sent');
+    await broadcastPage.waitForSelector('#modal-root #broadcast-title', { state: 'detached' });
     broadcastBackend.delayMs = 0;
     assert(broadcastBackend.broadcastRequests[0].email === 'admin@gmail.com' &&
       broadcastBackend.broadcastRequests[0].title === 'Audience update' &&
@@ -400,17 +431,19 @@ async function assertTourStep(page, id, tab, target = null) {
       await memberPage.close();
     }
 
+    await openComposer();
+    assert(await broadcastPage.inputValue('#broadcast-title') === '', 'a sent announcement clears the draft');
     await broadcastPage.fill('#broadcast-title', 'All-member update');
     await broadcastPage.fill('#broadcast-body', 'Everyone is welcome.');
     broadcastBackend.delayMs = 250;
     await broadcastPage.click('[data-action="broadcast-send"]');
     await broadcastPage.waitForSelector('[data-action="broadcast-send"][disabled]');
-    await broadcastPage.waitForSelector('[data-action="broadcast-send"]:not([disabled])');
-    await broadcastPage.waitForSelector('#toast-root >> text=Broadcast sent');
+    await broadcastPage.waitForSelector('#modal-root #broadcast-title', { state: 'detached' });
     broadcastBackend.delayMs = 0;
     assert(broadcastBackend.broadcastRequests[1].groups.length === 0, 'no group selection sends to everyone');
 
     broadcastBackend.failBroadcastPush = true;
+    await openComposer();
     await broadcastPage.fill('#broadcast-title', 'Bring umbrellas');
     await broadcastPage.fill('#broadcast-body', 'Meet at the covered entrance.');
     broadcastBackend.delayMs = 500;
@@ -432,6 +465,7 @@ async function assertTourStep(page, id, tab, target = null) {
     const broadcastsBeforeRejectedRequest = broadcastBackend.broadcastRequests.length;
     broadcastBackend.failNextAction = 'broadcastNotification';
     broadcastBackend.delayMs = 250;
+    await openComposer();
     await broadcastPage.fill('#broadcast-title', 'Rejected message');
     await broadcastPage.fill('#broadcast-body', 'This must not be sent.');
     const rejectedPopupPromise = broadcastPage.waitForEvent('popup');
@@ -450,8 +484,60 @@ async function assertTourStep(page, id, tab, target = null) {
     await atithiBroadcastPage.waitForSelector('#fake-gsi');
     await signIn(atithiBroadcastPage, 'viewer@gmail.com');
     await enter(atithiBroadcastPage);
-    assert(!(await visible(atithiBroadcastPage, '[data-tab="broadcast"]')), 'Atithi cannot see the Broadcast tab');
+    await atithiBroadcastPage.click('[data-tab="notifications"]');
+    await atithiBroadcastPage.waitForSelector('#view >> text=Audience update');
+    assert(await atithiBroadcastPage.locator('[data-action="open-composer"]').count() === 0, 'Atithi cannot see the Announce button');
+    assert(!(await visible(atithiBroadcastPage, '[data-tab="rooms"]')), 'Atithi without a room does not see the Rooms tab');
     await atithiBroadcastPage.close();
+
+    console.log('Admin manages places of stay and rooms; guests see only their own room');
+    const roomBackend = makeBackend();
+    roomBackend.members.push({ email: 'beta@gmail.com', role: 'Atithi', addedBy: 'admin@gmail.com', addedDate: '', tourStatus: 'Completed', groups: [] });
+    const roomPage = await newPage(browser, roomBackend);
+    await roomPage.waitForSelector('#fake-gsi');
+    await signIn(roomPage, 'admin@gmail.com');
+    await enter(roomPage);
+    await roomPage.click('[data-tab="rooms"]');
+    await roomPage.waitForSelector('#view >> text=No places of stay yet');
+    assert(await roomPage.isDisabled('[data-action="open-assign-room"]'), 'room assignment waits for a place of stay');
+    await roomPage.fill('form[data-action="add-stay"] input[name="label"]', 'Hotel Leela');
+    await roomPage.click('form[data-action="add-stay"] button[type="submit"]');
+    await roomPage.waitForSelector('#view >> text=Hotel Leela');
+    await roomPage.click('#view button[data-action="open-assign-room"]:not([data-email])');
+    await roomPage.waitForSelector('#modal-root select[name="stay"]');
+    await roomPage.fill('#modal-root input[name="room"]', '204');
+    await roomPage.fill('#modal-root [data-member-filter]', 'viewer');
+    assert(await roomPage.isHidden('#modal-root [data-member-option="beta@gmail.com"]'), 'member filter narrows the picker');
+    await roomPage.check('#modal-root input[name="emails"][value="viewer@gmail.com"]');
+    await roomPage.fill('#modal-root [data-member-filter]', '');
+    await roomPage.check('#modal-root input[name="emails"][value="beta@gmail.com"]');
+    await roomPage.click('#modal-root [data-modal="confirm"]');
+    await roomPage.waitForSelector('#view [data-action="open-room"][data-room="204"]');
+    const roomReq = roomBackend.roomRequests[0];
+    assert(roomReq.stay === 'Hotel Leela' && roomReq.room === '204' && [...roomReq.emails].sort().join() === 'beta@gmail.com,viewer@gmail.com',
+      'several members are assigned to one room in a single request');
+    assert((await roomPage.textContent('#view [data-action="open-room"][data-room="204"]')).includes('2 guests'), 'room tile shows its occupancy');
+    await roomPage.click('#view [data-action="open-room"][data-room="204"]');
+    await roomPage.waitForSelector('#modal-root >> text=Room 204');
+    await roomPage.click('#modal-root [data-room="clear"][data-email="beta@gmail.com"]');
+    await roomPage.waitForSelector('#modal-root [data-room="clear"][data-email="beta@gmail.com"]', { state: 'detached' });
+    assert((await roomPage.textContent('#modal-root')).includes('1 guest staying here'), 'room details refresh after removing a guest');
+    await roomPage.click('#modal-root [data-modal="cancel"]');
+    await roomPage.fill('[data-action="room-search"]', 'no-such-room');
+    await roomPage.waitForSelector('#view >> text=No matching rooms');
+    assert(roomBackend.audit.length === 3, 'every room mutation reaches the audited admin backend');
+    await roomPage.close();
+
+    const roomGuestPage = await newPage(browser, roomBackend);
+    await roomGuestPage.waitForSelector('#fake-gsi');
+    await signIn(roomGuestPage, 'viewer@gmail.com');
+    await enter(roomGuestPage);
+    await roomGuestPage.waitForSelector('[data-tab="rooms"]:not(.hidden)');
+    await roomGuestPage.click('[data-tab="rooms"]');
+    assert(await roomGuestPage.textContent('#view [data-my-room]') === '204', 'guest sees their own room number');
+    assert((await roomGuestPage.textContent('#view')).includes('Hotel Leela') && !(await roomGuestPage.textContent('#view')).includes('beta@gmail.com'),
+      'guest sees their place of stay but not other occupants');
+    await roomGuestPage.close();
 
     console.log('Tour uses stable fallbacks when Atithi screens are empty');
     const sparseTourBackend = makeBackend();
@@ -464,7 +550,7 @@ async function assertTourStep(page, id, tab, target = null) {
     await signIn(sparseTourPage, 'viewer@gmail.com');
     await enter(sparseTourPage);
     await sparseTourPage.waitForSelector('#tour-root');
-    assert(!(await visible(sparseTourPage, '[data-tab="broadcast"]')), 'Broadcast is not available to Atithis');
+    assert(!(await visible(sparseTourPage, '[data-tab="control"]')), 'Event Control is not available to Atithis');
     await sparseTourPage.click('[data-tour="next"]');
     await assertTourStep(sparseTourPage, 'schedule', 'schedule', '#view [data-tour="schedule-overview"]');
     await sparseTourPage.click('[data-tour="next"]');

@@ -7,7 +7,7 @@ try {
   // Offline or OneSignal unreachable: keep the app shell working without push.
 }
 
-const CACHE_VERSION = 'v1.7.16';
+const CACHE_VERSION = 'v1.8.0';
 const SHELL_CACHE = `event-shell-${CACHE_VERSION}`;
 
 const APP_SHELL = [

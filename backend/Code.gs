@@ -44,6 +44,7 @@ var SHEETS = {
   AUDIT: 'AuditLog',
   NOTIFICATIONS: 'Notifications', // in-app notification centre (one row per announcement sent)
   GROUPS: 'Groups', // canonical audience label registry
+  STAYS: 'Stays', // "Place of Stay" label registry (hotels, homes) used for room assignments
   LEGACY_ADMINS: 'Admins', // migrated into Members by setup()
 };
 
@@ -54,6 +55,7 @@ var HEADERS = {
   AuditLog: ['Timestamp', 'UserEmail', 'ActionCategory', 'Details'],
   Notifications: ['Timestamp', 'Title', 'Message', 'EventID', 'Groups', 'SentBy', 'PushStatus'],
   Groups: ['Label', 'Status'],
+  Stays: ['Label', 'Status'],
 };
 
 // Columns added in later versions. Read paths tolerate their absence; setup()
@@ -63,7 +65,8 @@ var OPTIONAL_HEADERS = {
   // Group: blank = for everyone; otherwise comma-separated labels ("Bride side, Family").
   Itinerary: ['MapLink', 'Group'],
   // Groups: the member's labels; NotificationsClearedAt: when they last tapped "Clear" in Notifications.
-  Members: ['TourStatus', 'TourCompletedAt', 'Groups', 'NotificationsClearedAt'],
+  // Stay/Room: the member's room assignment (one per member; several members may share a room).
+  Members: ['TourStatus', 'TourCompletedAt', 'Groups', 'NotificationsClearedAt', 'Stay', 'Room'],
   // Email links a travel row to the Atithi who sees it on "My travel"; DropStatus tracks the departure drop-off.
   Logistics: ['Email', 'DropStatus'],
 };
@@ -88,7 +91,10 @@ var isLegacyGuestRole_ = function (role) {
 var EVENT_STATUSES = ['Upcoming', 'Live', 'Completed'];
 var PICKUP_STATUSES = ['Pending', 'Picked Up'];
 var DROP_STATUSES = ['Pending', 'Dropped Off'];
-var AUDIT_CATEGORY = { EVENT: 'Event', LOGISTICS: 'Logistics', ADMIN: 'Admin Management', SECURITY: 'Security', ONBOARDING: 'Onboarding', SCHEMA: 'Schema' };
+var AUDIT_CATEGORY = { EVENT: 'Event', LOGISTICS: 'Logistics', ADMIN: 'Admin Management', SECURITY: 'Security', ONBOARDING: 'Onboarding', SCHEMA: 'Schema', ROOMS: 'Rooms' };
+var MAX_ROOM_LEN = 20;
+var MAX_ROOM_BATCH = 30;
+var ROOM_RE = /^[^<>"`\u0000-\u001f]+$/;
 var EMAIL_RE = /^[a-z0-9._%+-]{1,64}@[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,24}$/;
 var MAX_EMAIL_LEN = 254;
 var MAX_FIELD_LEN = 200;
@@ -158,6 +164,8 @@ function authenticate_(req) {
   user.tourStatus = member.tourStatus;
   user.groups = member.groups;
   user.notificationsClearedAt = member.notificationsClearedAt;
+  user.stay = member.stay;
+  user.room = member.room;
   return user;
 }
 
@@ -218,6 +226,7 @@ function buildSession_(user, admin) {
     notifications: notificationsFor_(user, admin),
     pushId: pushIdFor_(user.email),
     familyContact: familyContact_(),
+    myRoom: user.room ? { stay: user.stay || '', room: user.room } : null,
     serverTime: new Date().toISOString(),
   };
   var logistics = admin ? readLogistics_() : readLogisticsSafe_();
@@ -227,6 +236,7 @@ function buildSession_(user, admin) {
     session.members = readMembers_();
     session.knownGroups = knownGroups_(session.members, itinerary);
     session.groupCatalog = readGroupCatalog_();
+    session.stayCatalog = readStayCatalog_();
   }
   return session;
 }
@@ -580,6 +590,81 @@ var ACTIONS_ = {
       writeAudit_(user.email, AUDIT_CATEGORY.ADMIN, 'Archived group "' + String(row.values.Label).trim() + '"', req.timestamp);
     }
     return { groupCatalog: readGroupCatalog_() };
+  },
+
+  /** Adds a "Place of Stay" label (hotel, home, …). The Stays tab is created on first use if setup() was not re-run. */
+  addStay: function (payload, user, req) {
+    var label = requireCatalogLabel_(payload.label, 'Place of stay');
+    ensureCatalogSheet_(SHEETS.STAYS);
+    if (readStayCatalog_().some(function (stay) { return stay.label.toLowerCase() === label.toLowerCase(); })) {
+      throw new AppError('CONFLICT', 'A place of stay with that name already exists.');
+    }
+    appendRecord_(readTable_(SHEETS.STAYS), { Label: label, Status: 'Active' });
+    writeAudit_(user.email, AUDIT_CATEGORY.ROOMS, 'Added place of stay "' + label + '"', req.timestamp);
+    return { stayCatalog: readStayCatalog_() };
+  },
+
+  /** Archiving keeps existing room assignments but stops new ones. */
+  archiveStay: function (payload, user, req) {
+    var label = requireCatalogLabel_(payload.label, 'Place of stay');
+    if (!SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEETS.STAYS)) throw new AppError('NOT_FOUND', 'Place of stay "' + label + '" does not exist.');
+    var table = readTable_(SHEETS.STAYS);
+    var row = table.rows.find(function (candidate) {
+      return String(candidate.values.Label || '').trim().toLowerCase() === label.toLowerCase();
+    });
+    if (!row) throw new AppError('NOT_FOUND', 'Place of stay "' + label + '" does not exist.');
+    if (String(row.values.Status || '').trim() !== 'Archived') {
+      setCell_(table, row, 'Status', 'Archived');
+      writeAudit_(user.email, AUDIT_CATEGORY.ROOMS, 'Archived place of stay "' + String(row.values.Label).trim() + '"', req.timestamp);
+    }
+    return { stayCatalog: readStayCatalog_() };
+  },
+
+  /** Assigns (or moves) one or more members to a room in an active place of stay. Several members may share a room. */
+  assignRoom: function (payload, user, req) {
+    var raw = Array.isArray(payload.emails) ? payload.emails : [payload.email];
+    if (!raw.length || raw.length > MAX_ROOM_BATCH) throw new AppError('BAD_REQUEST', 'Choose between 1 and ' + MAX_ROOM_BATCH + ' members.');
+    var emails = raw.map(function (e) { return requireEmail_(e, true); })
+      .filter(function (e, i, all) { return all.indexOf(e) === i; });
+    var room = requireString_(payload.room, 'room', MAX_ROOM_LEN).replace(/\s+/g, ' ');
+    if (!ROOM_RE.test(room)) throw new AppError('BAD_REQUEST', 'Room must be up to ' + MAX_ROOM_LEN + ' characters without < > " or `.');
+    var wanted = requireCatalogLabel_(payload.stay, 'Place of stay');
+    var stay = readStayCatalog_().find(function (s) { return s.label.toLowerCase() === wanted.toLowerCase(); });
+    if (!stay) throw new AppError('BAD_REQUEST', 'Choose a place of stay from the list.');
+
+    ensureColumns_(SHEETS.MEMBERS, OPTIONAL_HEADERS.Members);
+    var table = readTable_(SHEETS.MEMBERS);
+    var rows = emails.map(function (email) {
+      var row = findMemberRow_(table, email);
+      if (!row) throw new AppError('NOT_FOUND', email + ' is not a member. Add them in Members first.');
+      return { email: email, row: row };
+    });
+    var changes = rows.filter(function (r) {
+      return String(r.row.values.Stay || '').trim() !== stay.label || String(r.row.values.Room || '').trim() !== room;
+    });
+    if (changes.length && stay.status !== 'Active') throw new AppError('BAD_REQUEST', 'Archived places of stay cannot take new room assignments.');
+
+    changes.forEach(function (r) {
+      var previous = roomLabel_(r.row.values.Stay, r.row.values.Room);
+      setCell_(table, r.row, 'Stay', stay.label);
+      setCell_(table, r.row, 'Room', room);
+      writeAudit_(user.email, AUDIT_CATEGORY.ROOMS, 'Assigned ' + r.email + ' to ' + roomLabel_(stay.label, room) +
+        (previous ? ' (was ' + previous + ')' : ''), req.timestamp);
+    });
+    return { members: readMembers_() };
+  },
+
+  clearRoom: function (payload, user, req) {
+    var email = requireEmail_(payload.email, true);
+    var table = readTable_(SHEETS.MEMBERS);
+    var row = findMemberRow_(table, email);
+    if (!row) throw new AppError('NOT_FOUND', email + ' is not a member.');
+    var previous = roomLabel_(row.values.Stay, row.values.Room);
+    if (!previous) return { members: readMembers_() };
+    setCell_(table, row, 'Stay', '');
+    setCell_(table, row, 'Room', '');
+    writeAudit_(user.email, AUDIT_CATEGORY.ROOMS, 'Removed room assignment of ' + email + ' (was ' + previous + ')', req.timestamp);
+    return { members: readMembers_() };
   },
 
   updateMemberRole: function (payload, user, req) {
@@ -1066,16 +1151,29 @@ function resolveGroups_(value, previous) {
 }
 
 function requireGroupLabel_(value) {
+  return requireCatalogLabel_(value, 'Group label');
+}
+
+function requireCatalogLabel_(value, noun) {
   var label = requireString_(value, 'label').replace(/\s+/g, ' ').trim();
   if (label.length > MAX_GROUP_LEN || label.indexOf(',') >= 0 || !GROUP_RE.test(label)) {
-    throw new AppError('BAD_REQUEST', 'Group label must be up to ' + MAX_GROUP_LEN + ' characters without commas or unsafe characters.');
+    throw new AppError('BAD_REQUEST', noun + ' must be up to ' + MAX_GROUP_LEN + ' characters without commas or unsafe characters.');
   }
   return label;
 }
 
 function readGroupCatalog_() {
-  if (!SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEETS.GROUPS)) return [];
-  return readTable_(SHEETS.GROUPS).rows
+  return readCatalog_(SHEETS.GROUPS);
+}
+
+function readStayCatalog_() {
+  return readCatalog_(SHEETS.STAYS);
+}
+
+/** Label/Status registry tabs (Groups, Stays), sorted by label. A missing tab is an empty catalog. */
+function readCatalog_(sheetName) {
+  if (!SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName)) return [];
+  return readTable_(sheetName).rows
     .map(function (row) {
       var label = String(row.values.Label || '').trim();
       var status = String(row.values.Status || '').trim();
@@ -1087,6 +1185,23 @@ function readGroupCatalog_() {
       var lowerB = b.label.toLowerCase();
       return lowerA < lowerB ? -1 : lowerA > lowerB ? 1 : 0;
     });
+}
+
+/** Creates a Label/Status tab with headers if it does not exist yet (never touches an existing tab). */
+function ensureCatalogSheet_(sheetName) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (ss.getSheetByName(sheetName)) return;
+  var sheet = ss.insertSheet(sheetName);
+  sheet.getRange(1, 1, 1, HEADERS[sheetName].length).setValues([HEADERS[sheetName]]).setFontWeight('bold');
+  sheet.setFrozenRows(1);
+}
+
+/** "Hotel Leela · Room 204", or '' when nothing is assigned. */
+function roomLabel_(stay, room) {
+  var s = String(stay == null ? '' : stay).trim();
+  var r = String(room == null ? '' : room).trim();
+  if (!r) return '';
+  return (s ? s + ' · ' : '') + 'Room ' + r;
 }
 
 function seedGroupCatalog_() {
@@ -1332,6 +1447,8 @@ function readMembers_() {
         tourStatus: normalizeTour_(r.values.TourStatus),
         groups: parseGroups_(r.values.Groups),
         notificationsClearedAt: toIso_(r.values.NotificationsClearedAt),
+        stay: String(r.values.Stay == null ? '' : r.values.Stay).trim(),
+        room: String(r.values.Room == null ? '' : r.values.Room).trim(),
       };
     })
     .filter(function (m) { return m.email; });

@@ -131,6 +131,10 @@
       groups: [],
       knownGroups: [],
       groupCatalog: [],
+      stayCatalog: [],     // admin-only "Place of Stay" labels
+      myRoom: null,        // { stay, room } for the signed-in member, if assigned
+      roomSearch: '',
+      noticeFilter: 'all', // admin notices filter: all | notes | events
       pushId: '',
       eventGroupsDrafts: {},
       memberGroupsDrafts: {},
@@ -307,7 +311,7 @@
       Store.set({
         user: { email: last.email, name: last.name || last.email, picture: safePicture(last.picture) },
         authStatus: 'offline', role: GUEST_ROLE, isAdmin: false, logistics: [], members: [], myTravel: [],
-        itinerary: cache.itinerary, notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '',
+        itinerary: cache.itinerary, notifications: [], groups: [], knownGroups: [], groupCatalog: [], stayCatalog: [], myRoom: null, roomSearch: '', pushId: '',
         eventGroupsDrafts: {}, memberGroupsDrafts: {}, lastSynced: cache.savedAt,
       });
       this.scheduleOfflineExpiry(savedAt);
@@ -428,6 +432,8 @@
         groups: memberGroups,
         knownGroups: Array.isArray(data.knownGroups) ? data.knownGroups : [],
         groupCatalog: Array.isArray(data.groupCatalog) ? data.groupCatalog : [],
+        stayCatalog: isAdmin && Array.isArray(data.stayCatalog) ? data.stayCatalog : [],
+        myRoom: data.myRoom && typeof data.myRoom === 'object' && data.myRoom.room ? { stay: String(data.myRoom.stay || ''), room: String(data.myRoom.room) } : null,
         broadcastDraft: preserveBroadcastDraft ? Store.state.broadcastDraft : { title: '', body: '', groups: [] },
         pushId: typeof data.pushId === 'string' ? data.pushId : '',
         eventGroupsDrafts: {},
@@ -461,7 +467,7 @@
       storage.remove(STORAGE.CREDENTIAL);
       storage.remove(STORAGE.LAST_USER);
       storage.remove(STORAGE.DATA_CACHE);
-      Store.set({ user: null, role: null, isAdmin: false, loading: false, itinerary: [], logistics: [], members: [], formResponses: null, formGroupsDrafts: {}, myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openEventControls: new Set(), openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, familyContact: null, tab: 'schedule', lastSynced: null, ...patch });
+      Store.set({ user: null, role: null, isAdmin: false, loading: false, itinerary: [], logistics: [], members: [], formResponses: null, formGroupsDrafts: {}, myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], stayCatalog: [], myRoom: null, roomSearch: '', pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openEventControls: new Set(), openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, familyContact: null, tab: 'schedule', lastSynced: null, ...patch });
     },
 
     deny(email) {
@@ -477,7 +483,7 @@
       void Push.logout();
       sessionStore.remove(STORAGE.CREDENTIAL);
       // Admin-only data must not linger on screen after the session ends.
-      Store.set({ authStatus: 'signed-out', user: null, isAdmin: false, role: null, logistics: [], members: [], formResponses: null, formGroupsDrafts: {}, myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openEventControls: new Set(), openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, loading: false, tab: 'schedule' });
+      Store.set({ authStatus: 'signed-out', user: null, isAdmin: false, role: null, logistics: [], members: [], formResponses: null, formGroupsDrafts: {}, myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], stayCatalog: [], myRoom: null, roomSearch: '', pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openEventControls: new Set(), openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, loading: false, tab: 'schedule' });
       Modal.close();
       Tour.cancel();
       this.prompt();
@@ -1035,10 +1041,11 @@
       ];
       if (s.isAdmin) {
         steps.push(
+          { id: 'announce', tab: 'notifications', targets: ['#view [data-tour="announce-fab"]'], title: 'Send an announcement', body: 'Tap 📣 Announce to write a note for everyone or selected groups, then optionally share the same message on WhatsApp.' },
           { id: 'event-control', tab: 'control', targets: ['#view [data-tour="event-control"]'], title: 'Event Control', body: 'Create ceremonies, choose their audience, then mark one Live to notify guests and prepare a WhatsApp broadcast.' },
-          { id: 'broadcast', tab: 'broadcast', targets: ['#view [data-tour="broadcast-overview"]'], title: 'Broadcast', body: 'Send a standalone note to everyone or selected groups, then optionally open the same title and message in WhatsApp.' },
           { id: 'pick-drop', tab: 'pickups', targets: ['#view [data-tour="pick-drop-overview"]'], title: 'Pick-up and drop-off', body: 'Add and edit travel plans, switch between arrivals and departures, and track each family’s progress.' },
           { id: 'members', tab: 'members', targets: ['#view [data-tour="members-overview"]'], title: 'Members & access', body: 'Invite Atithis, assign roles and group labels, and manage the available group labels.' },
+          { id: 'rooms', tab: 'rooms', targets: ['#view [data-tour="rooms-overview"]'], title: 'Rooms', body: 'Add places of stay, assign members to rooms, and tap any room to see who is staying there.' },
         );
       } else {
         steps.push({
@@ -1048,6 +1055,7 @@
             ? 'Check your arrival pick-up and departure drop here. If the details do not match your latest plan, contact the family shown on this screen.'
             : 'Your arrival and departure details will appear here once the family adds them. If you need to confirm your RSVP, please contact the family.',
         });
+        if (s.myRoom) steps.push({ id: 'rooms', tab: 'rooms', targets: ['#view [data-tour="rooms-overview"]'], title: 'Your room', body: 'Your place of stay and room number are always here.' });
       }
       steps.push(
         { id: 'notify', tab: 'schedule', targets: ['[data-tour="notification-opt-in"]'], title: 'Never miss a ceremony', body: 'Use the notification banner to opt in if it is shown. If it is hidden, notifications may already be enabled. This tour never opens a permission prompt.' },
@@ -1531,13 +1539,14 @@
       </div>`;
   };
 
-  Views.broadcast = (s) => {
+  /** Standalone announcement composer, shown in a modal from the Notices tab (admins only). */
+  const broadcastComposer = (s) => {
     const draft = s.broadcastDraft || { title: '', body: '', groups: [] };
-    const busy = Store.isPending('broadcast:send');
     return `
-      ${pageHeader('Host console', 'Broadcast', 'Send a note that is not tied to a ceremony.', 'broadcast-overview')}
-      <section class="card p-4 space-y-4">
-        <p class="text-sm text-ink-600">No groups selected means everyone. Select multiple groups to reach members in any selected group.</p>
+      <p class="eyebrow">Host announcement</p>
+      <h3 class="font-display text-2xl text-kumkum-700">Send a notice</h3>
+      <p class="mt-1 text-sm text-ink-600">No groups selected means everyone. Select multiple groups to reach members in any selected group.</p>
+      <div class="mt-3 space-y-3">
         ${field('Notification title', `<input id="broadcast-title" data-action="broadcast-title" type="text" maxlength="200" required value="${escapeHtml(draft.title)}" class="input" autocomplete="off" />`)}
         ${field('Message', `<textarea id="broadcast-body" data-action="broadcast-body" maxlength="500" rows="5" required class="input">${escapeHtml(draft.body)}</textarea>`)}
         <fieldset>
@@ -1545,14 +1554,11 @@
           ${groupPicker(s.groupCatalog, draft.groups, 'broadcast-groups')}
         </fieldset>
         <div class="grid gap-2 sm:grid-cols-2">
-          <button type="button" data-action="broadcast-send" ${busy ? 'disabled' : ''} ${pendingAttrs('broadcast:send')} class="btn btn-primary min-h-[44px]">
-            ${spinnerOr('broadcast:send', '📣 Broadcast')}
-          </button>
-          <button type="button" data-action="broadcast-whatsapp" ${busy ? 'disabled' : ''} ${pendingAttrs('broadcast:send')} class="btn btn-whatsapp min-h-[44px]">
-            ${spinnerOr('broadcast:send', '📣 Broadcast + WhatsApp')}
-          </button>
+          <button type="button" data-action="broadcast-send" class="btn btn-primary min-h-[44px]">📣 Broadcast</button>
+          <button type="button" data-action="broadcast-whatsapp" class="btn btn-whatsapp min-h-[44px]">📣 Broadcast + WhatsApp</button>
         </div>
-      </section>`;
+        <button type="button" data-modal="cancel" class="btn btn-ghost w-full min-h-[44px]">Close · keep draft</button>
+      </div>`;
   };
 
   /** Pick-up (arrival) and drop (departure) are the same rows seen through two lenses. */
@@ -1838,17 +1844,34 @@
       ${list.length ? listHtml : empty}`;
   };
 
+  const NOTICE_FILTERS = [['all', 'All'], ['notes', 'Host notes'], ['events', 'Ceremony updates']];
+
   Views.notifications = (s) => {
-    const items = [...(s.notifications || [])].sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
+    const all = [...(s.notifications || [])].sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
+    const filter = s.isAdmin ? s.noticeFilter : 'all';
+    const matchesFilter = (n) => (filter === 'notes' ? !n.eventId : filter !== 'events' || !!n.eventId);
+    const items = all.filter(matchesFilter);
+    const failed = s.isAdmin ? all.filter((n) => String(n.pushStatus || '').startsWith('Failed')).length : 0;
+    const count = (key) => all.filter((n) => (key === 'notes' ? !n.eventId : key !== 'events' || !!n.eventId)).length;
+    const adminBar = s.isAdmin && all.length ? `
+      <div class="mb-3 flex gap-2 overflow-x-auto no-scrollbar" role="group" aria-label="Filter notices">
+        ${NOTICE_FILTERS.map(([key, label]) => `<button type="button" data-action="notice-filter" data-value="${key}" aria-pressed="${filter === key}"
+          class="${filter === key ? 'chip-on' : 'chip-off'} min-h-[44px] shrink-0">${label} · ${count(key)}</button>`).join('')}
+        ${failed ? `<span class="chip shrink-0 self-center bg-rose-50 text-rose-700 ring-1 ring-rose-200">⚠️ ${failed} push failed</span>` : ''}
+      </div>` : '';
+    const emptyText = s.isAdmin
+      ? (all.length ? 'Nothing in this filter yet.' : 'Tap 📣 Announce to send your first note to guests.')
+      : 'When a host shares an event update, it will appear here.';
     return `
       ${pageHeader('Announcements from the hosts', 'Notifications', '', 'notifications-overview')}
       <section class="card p-4 mb-3">
-        <p class="text-sm text-ink-600">Event updates and host announcements appear here.</p>
-        <button data-action="clear-notifications" ${!items.length || Store.isPending('notifications:clear') ? 'disabled' : ''} ${pendingAttrs('notifications:clear')} class="btn btn-ghost btn-sm mt-3 min-h-[44px]">
+        <p class="text-sm text-ink-600">${s.isAdmin ? 'Event updates and your announcements appear here. Use <b>📣 Announce</b> to send a new one.' : 'Event updates and host announcements appear here.'}</p>
+        <button data-action="clear-notifications" ${!all.length || Store.isPending('notifications:clear') ? 'disabled' : ''} ${pendingAttrs('notifications:clear')} class="btn btn-ghost btn-sm mt-3 min-h-[44px]">
           ${spinnerOr('notifications:clear', 'Clear notifications')}
         </button>
       </section>
-      ${items.length ? `<div class="space-y-3">${items.map((n) => `
+      ${adminBar}
+      ${items.length ? `<div class="space-y-3 ${s.isAdmin ? 'pb-20' : ''}">${items.map((n) => `
         <article class="card p-4">
           <div class="flex items-start justify-between gap-2">
             <div class="min-w-0">
@@ -1857,13 +1880,116 @@
               <p class="mt-2 text-xs text-ink-400">${escapeHtml(formatDateTime(n.at))}${n.groups?.length ? ` · ${escapeHtml(n.groups.join(', '))}` : ' · Everyone'}</p>
               ${s.isAdmin ? `<p class="mt-1 text-[11px] text-ink-500">By ${escapeHtml(n.sentBy || '—')} · ${escapeHtml(n.pushStatus && n.pushStatus.startsWith('Failed')  ? 'Failed' : (n.pushStatus || 'Not sent'))}</p>` : ''}
             </div>
-            <span class="text-2xl" aria-hidden="true">🔔</span>
+            <span class="text-2xl" aria-hidden="true">${n.eventId ? '🪔' : '🔔'}</span>
           </div>
-        </article>`).join('')}</div>` : emptyState('🔔', 'No announcements yet', 'When a host shares an event update, it will appear here.')}`;
+        </article>`).join('')}</div>` : emptyState('🔔', all.length ? 'No matching announcements' : 'No announcements yet', emptyText)}
+      ${s.isAdmin ? `<button type="button" data-action="open-composer" data-tour="announce-fab" aria-haspopup="dialog"
+        class="announce-fab fixed right-4 z-20 inline-flex min-h-[52px] items-center gap-2 rounded-full bg-kumkum-600 px-5 font-semibold text-ivory-50 shadow-lift ring-2 ring-haldi-300 hover:bg-kumkum-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-haldi-400">
+        <span aria-hidden="true">📣</span> Announce${hasDraft(s.broadcastDraft) ? '<span class="ml-1 rounded-full bg-haldi-300 px-2 py-0.5 text-[10px] text-ink-900">Draft</span>' : ''}
+      </button>` : ''}`;
+  };
+
+  const hasDraft = (d) => !!(d && (String(d.title || '').trim() || String(d.body || '').trim()));
+
+  const roomText = (stay, room) => `${stay ? `${stay} · ` : ''}Room ${room}`;
+  /** { stayLabel: { roomNumber: [member, …] } } from the members list, rooms sorted naturally. */
+  const roomsByStay = (members) => {
+    const out = {};
+    members.filter((m) => m.room).forEach((m) => {
+      const stay = m.stay || 'Unspecified';
+      out[stay] ||= {};
+      (out[stay][m.room] ||= []).push(m);
+    });
+    return out;
+  };
+  const naturalSort = (a, b) => String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
+
+  Views.rooms = (s) => (s.isAdmin ? adminRoomsView(s) : guestRoomView(s));
+
+  const guestRoomView = (s) => {
+    const r = s.myRoom;
+    return `
+      ${pageHeader('Your stay', 'My room', 'Where you are staying during the celebration.', 'rooms-overview')}
+      ${r ? `<section class="card relative overflow-hidden p-5 text-center">
+        <div class="toran absolute inset-x-0 top-0" aria-hidden="true"></div>
+        <p class="eyebrow mt-2">Place of stay</p>
+        <p class="font-display text-2xl text-kumkum-700">${escapeHtml(r.stay || 'To be confirmed')}</p>
+        <p class="eyebrow mt-4">Room</p>
+        <p class="font-display text-5xl text-kumkum-800" data-my-room>${escapeHtml(r.room)}</p>
+        <p class="mt-4 text-sm text-ink-600">Need help with your room? Please reach out to the family.</p>
+      </section>` : emptyState('🏨', 'No room assigned yet', 'Your room will appear here once the family assigns it.')}`;
+  };
+
+  const adminRoomsView = (s) => {
+    const q = s.roomSearch.trim().toLowerCase();
+    const byStay = roomsByStay(s.members);
+    const assigned = s.members.filter((m) => m.room).length;
+    const unassigned = s.members.filter((m) => !m.room);
+    const roomCount = Object.values(byStay).reduce((n, rooms) => n + Object.keys(rooms).length, 0);
+    const stat = (n, label) => `<div class="card py-2"><p class="font-display text-xl text-kumkum-700">${n}</p><p class="text-[11px] text-ink-500">${label}</p></div>`;
+    const activeStays = s.stayCatalog.filter((st) => st.status === 'Active');
+    const matches = (stay, room, people) => !q || stay.toLowerCase().includes(q) || String(room).toLowerCase().includes(q)
+      || people.some((m) => m.email.includes(q));
+    const staySections = Object.keys(byStay).sort(naturalSort).map((stay) => {
+      const rooms = Object.keys(byStay[stay]).sort(naturalSort).filter((room) => matches(stay, room, byStay[stay][room]));
+      if (!rooms.length) return '';
+      return `
+        <section class="mb-4" data-stay-section="${escapeHtml(stay)}">
+          <h3 class="mb-2 flex items-center justify-between gap-2 font-display text-lg text-kumkum-700">
+            <span class="truncate">🏨 ${escapeHtml(stay)}</span>
+            <span class="shrink-0 text-xs font-sans font-semibold text-ink-500">${rooms.length} room${rooms.length === 1 ? '' : 's'}</span>
+          </h3>
+          <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+            ${rooms.map((room) => {
+              const people = byStay[stay][room];
+              return `<button type="button" data-action="open-room" data-stay="${escapeHtml(stay)}" data-room="${escapeHtml(room)}"
+                aria-label="${escapeHtml(roomText(stay, room))}, ${people.length} guest${people.length === 1 ? '' : 's'}"
+                class="card min-h-[72px] p-3 text-left transition hover:ring-2 hover:ring-haldi-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-haldi-400">
+                <p class="font-display text-xl text-kumkum-800 truncate">${escapeHtml(room)}</p>
+                <p class="text-xs text-ink-500">👥 ${people.length} guest${people.length === 1 ? '' : 's'}</p>
+                <p class="mt-1 truncate text-[11px] text-ink-400">${escapeHtml(people.map((m) => m.email.split('@')[0]).join(', '))}</p>
+              </button>`;
+            }).join('')}
+          </div>
+        </section>`;
+    }).join('');
+    const filteredUnassigned = unassigned.filter((m) => !q || m.email.includes(q));
+    return `
+      ${pageHeader('Stay & rooms', 'Rooms', 'Add places of stay, then assign members to rooms. Several members can share a room. Every change is recorded in the AuditLog.', 'rooms-overview')}
+      <div class="grid grid-cols-3 gap-2 text-center mb-4">${stat(roomCount, 'Rooms')}${stat(assigned, 'Assigned')}${stat(unassigned.length, 'Unassigned')}</div>
+      <section class="card p-4 mb-4">
+        <h3 class="font-display text-xl text-kumkum-700">Places of stay</h3>
+        <p class="mt-1 text-xs text-ink-500">Hotels, homes or guest houses. Archiving keeps current rooms but prevents new assignments.</p>
+        <form data-action="add-stay" class="mt-3 flex gap-2" novalidate>
+          <input name="label" maxlength="30" required placeholder="e.g. Hotel Leela" aria-label="New place of stay" class="input min-w-0" />
+          <button type="submit" ${Store.isPending('stay:add') ? 'disabled' : ''} ${pendingAttrs('stay:add')} class="btn btn-primary shrink-0">${spinnerOr('stay:add', 'Add')}</button>
+        </form>
+        ${s.stayCatalog.length ? `<ul class="mt-3 divide-y divide-haldi-100">
+          ${s.stayCatalog.map((stay) => `<li class="flex min-h-[48px] items-center justify-between gap-2 py-2">
+            <span class="text-sm text-ink-800">${escapeHtml(stay.label)} ${stay.status === 'Archived' ? '<span class="text-xs text-ink-500">(archived)</span>' : ''}</span>
+            ${stay.status === 'Active' ? `<button type="button" data-action="archive-stay" data-label="${escapeHtml(stay.label)}" ${Store.isPending(`stay:${stay.label}`) ? 'disabled' : ''} ${pendingAttrs(`stay:${stay.label}`)} class="btn btn-ghost btn-sm min-h-[44px]">${spinnerOr(`stay:${stay.label}`, 'Archive')}</button>` : ''}
+          </li>`).join('')}
+        </ul>` : emptyState('🏨', 'No places of stay yet', 'Add one to start assigning rooms.')}
+      </section>
+      <button type="button" data-action="open-assign-room" ${activeStays.length && s.members.length ? '' : 'disabled'} class="btn btn-primary w-full min-h-[48px] mb-4">🛏️ Assign a room</button>
+      <div class="relative mb-4">
+        <span class="pointer-events-none absolute inset-y-0 left-3 grid place-items-center text-ink-400" aria-hidden="true">⌕</span>
+        <input type="search" data-action="room-search" value="${escapeHtml(s.roomSearch)}" placeholder="Search room, place or email…" aria-label="Search rooms" class="input min-h-[48px] pl-10" />
+      </div>
+      ${staySections || emptyState('🛏️', assigned ? 'No matching rooms' : 'No rooms assigned yet', assigned ? '' : 'Use “Assign a room” to place members in rooms.')}
+      ${unassigned.length ? `<details data-unassigned class="card mb-4 px-4" ${q ? 'open' : ''}>
+        <summary class="min-h-[48px] cursor-pointer py-3 text-sm font-semibold text-ink-700">Without a room · ${unassigned.length}</summary>
+        <ul class="divide-y divide-haldi-100 border-t border-haldi-100 pb-2">
+          ${filteredUnassigned.map((m) => `<li class="flex min-h-[48px] items-center justify-between gap-2 py-2">
+            <span class="min-w-0 truncate text-sm text-ink-800">${escapeHtml(m.email)}</span>
+            <button type="button" data-action="open-assign-room" data-email="${escapeHtml(m.email)}" ${activeStays.length ? '' : 'disabled'} class="btn btn-ghost btn-sm shrink-0 min-h-[44px]" aria-label="Assign a room to ${escapeHtml(m.email)}">Assign</button>
+          </li>`).join('') || '<li class="py-3 text-xs text-ink-500">No matching members.</li>'}
+        </ul>
+      </details>` : ''}`;
   };
 
   /* --------------------------------------------------------------- Render */
-  const ADMIN_TABS = new Set(['control', 'pickups', 'members', 'broadcast']);
+  const ADMIN_TABS = new Set(['control', 'pickups', 'members']);
   const GUEST_TABS = new Set(['travel']); // admins see everyone's travel under Pick & Drop
   let lastGateKey = null;
 
@@ -1916,12 +2042,20 @@
     Push.render();
   }
 
+  function navShown(btn, s, roomsTab) {
+    if (btn.dataset.tab === 'rooms') return roomsTab;
+    if (btn.classList.contains('admin-only')) return s.isAdmin;
+    return !btn.classList.contains('guest-only') || !s.isAdmin;
+  }
+
   function renderNav(s, signedIn) {
-    if ((!s.isAdmin && ADMIN_TABS.has(s.tab)) || (s.isAdmin && GUEST_TABS.has(s.tab))) s.tab = 'schedule';
-    $('#nav-grid').className = `max-w-2xl mx-auto grid ${s.isAdmin ? 'grid-cols-6' : 'grid-cols-3'}`;
+    const roomsTab = s.isAdmin || !!s.myRoom;
+    if ((!s.isAdmin && ADMIN_TABS.has(s.tab)) || (s.isAdmin && GUEST_TABS.has(s.tab)) || (s.tab === 'rooms' && !roomsTab)) s.tab = 'schedule';
+    const guestCols = roomsTab ? 'grid-cols-4' : 'grid-cols-3';
+    $('#nav-grid').className = `max-w-2xl mx-auto grid ${s.isAdmin ? 'grid-cols-6' : guestCols}`;
     $('#bottom-nav').classList.toggle('hidden', !signedIn);
     $$('.nav-btn').forEach((btn) => {
-      const shown = btn.classList.contains('admin-only') ? s.isAdmin : !btn.classList.contains('guest-only') || !s.isAdmin;
+      const shown = navShown(btn, s, roomsTab);
       btn.classList.toggle('hidden', !shown);
       btn.classList.toggle('flex', shown);
       const active = btn.dataset.tab === s.tab;
@@ -1949,8 +2083,11 @@
     const caret = focusKey && typeof active.selectionStart === 'number' ? active.selectionStart : null;
     const before = memberFormFields();
     const draft = before ? { email: before.email.value, role: before.role.value, groups: checkedGroups(before.form), focused: active === before.email } : null;
-    const groupInput = $('form[data-action="add-group"] input[name="label"]');
-    const groupDraft = groupInput ? { value: groupInput.value, focused: active === groupInput } : null;
+    const labelDrafts = ['add-group', 'add-stay'].map((form) => {
+      const input = $(`form[data-action="${form}"] input[name="label"]`);
+      return input ? { form, value: input.value, focused: active === input } : null;
+    }).filter(Boolean);
+    const unassignedOpen = $('[data-unassigned]')?.open;
     $$('[data-member-groups]').forEach((details) => {
       if (details.open) s.openMemberGroups.add(details.dataset.email);
       else s.openMemberGroups.delete(details.dataset.email);
@@ -1977,12 +2114,15 @@
       after.form.querySelectorAll('input[name="groups"]').forEach((checkbox) => { checkbox.checked = selectedGroups.has(checkbox.value); });
       if (draft.focused) after.email.focus();
     }
-    const nextGroupInput = $('form[data-action="add-group"] input[name="label"]');
-    if (nextGroupInput && groupDraft) {
-      nextGroupInput.value = groupDraft.value;
-      if (groupDraft.focused) nextGroupInput.focus();
-    }
-    if (['pickup-search', 'member-search'].includes(focusKey)) {
+    labelDrafts.forEach((d) => {
+      const input = $(`form[data-action="${d.form}"] input[name="label"]`);
+      if (!input) return;
+      input.value = d.value;
+      if (d.focused) input.focus();
+    });
+    const unassigned = $('[data-unassigned]');
+    if (unassigned && unassignedOpen) unassigned.open = true;
+    if (['pickup-search', 'member-search', 'room-search'].includes(focusKey)) {
       const el = $(`[data-action="${focusKey}"]`);
       if (el) { el.focus(); if (caret !== null) el.setSelectionRange(caret, caret); }
     }
@@ -2127,7 +2267,7 @@
       const groups = Array.isArray(draft.groups) ? [...draft.groups] : [];
       if (!title || !body) {
         Toast.show('Enter a title and message before broadcasting.', 'error');
-        return;
+        return false;
       }
 
       const popup = shareToWhatsApp ? window.open('about:blank', '_blank') : null;
@@ -2135,11 +2275,12 @@
       const data = await this.run('broadcast:send', () => Api.post('broadcastNotification', { title, body, groups }));
       if (!data) {
         popup?.close();
-        return;
+        return false;
       }
 
       Store.set({
         notifications: data.notifications,
+        noticeFilter: 'all',
         broadcastDraft: { title: '', body: '', groups: [] },
       });
       const push = data.push;
@@ -2151,6 +2292,37 @@
         else status += ' The browser blocked the WhatsApp window.';
       }
       Toast.show(status, push.ok ? 'success' : 'error', 6000);
+      return true;
+    },
+
+    /** Announcement composer lives in a modal so background refreshes never wipe the draft. */
+    openComposer() {
+      Modal.open(broadcastComposer(Store.state), {
+        onMount: (root) => {
+          const draft = Store.state.broadcastDraft;
+          root.querySelector('[data-modal="cancel"]').addEventListener('click', () => { Modal.close(); Store.set({}); });
+          root.addEventListener('input', (e) => {
+            if (e.target.matches('[data-action="broadcast-title"]')) draft.title = e.target.value;
+            if (e.target.matches('[data-action="broadcast-body"]')) draft.body = e.target.value;
+          });
+          root.addEventListener('change', (e) => {
+            if (e.target.matches('input[data-action="broadcast-groups"]')) draft.groups = checkedGroups(e.target.closest('fieldset'));
+          });
+          const buttons = [...root.querySelectorAll('[data-action="broadcast-send"], [data-action="broadcast-whatsapp"]')];
+          buttons.forEach((btn) => btn.addEventListener('click', async () => {
+            const label = btn.innerHTML;
+            buttons.forEach((b) => { b.disabled = true; });
+            btn.setAttribute('aria-busy', 'true');
+            btn.innerHTML = '<span class="spinner" aria-hidden="true"></span><span class="sr-only">Sending announcement</span>';
+            const ok = await this.sendBroadcast(btn.dataset.action === 'broadcast-whatsapp');
+            if (ok) { Modal.close(); return; }
+            buttons.forEach((b) => { b.disabled = false; });
+            btn.removeAttribute('aria-busy');
+            btn.innerHTML = label;
+          }));
+          setTimeout(() => root.querySelector('#broadcast-title')?.focus(), 0);
+        },
+      });
     },
 
     async updateEventGroups(eventId) {
@@ -2283,6 +2455,31 @@
       if (data) Store.set({ groupCatalog: data.groupCatalog });
     },
 
+    async addStay(form) {
+      const input = form.querySelector('input[name="label"]');
+      const submitted = input.value;
+      const label = submitted.trim();
+      if (!label) { Toast.show('Enter a place of stay.', 'error'); input.focus(); return; }
+      const data = await this.run('stay:add', () => Api.post('addStay', { label }), `"${label}" added`);
+      if (!data) return;
+      const current = $('form[data-action="add-stay"] input[name="label"]');
+      if (current?.value === submitted) current.value = '';
+      Store.set({ stayCatalog: data.stayCatalog });
+    },
+
+    async archiveStay(label) {
+      if (!window.confirm(`Archive "${label}"? Current rooms stay in place, but no new rooms can be assigned there.`)) return;
+      const data = await this.run(`stay:${label}`, () => Api.post('archiveStay', { label }), `"${label}" archived`);
+      if (data) Store.set({ stayCatalog: data.stayCatalog });
+    },
+
+    async clearRoom(email) {
+      if (!window.confirm(`Remove ${email} from their room?`)) return false;
+      const data = await this.run(`room:${email}`, () => Api.post('clearRoom', { email }), `${email} no longer has a room`);
+      if (data) Store.set({ members: data.members });
+      return !!data;
+    },
+
     async setRole(email, role) {
       if (email === Store.state.user?.email) { Toast.show('You cannot change your own role.', 'error'); return; }
       if (!window.confirm(`Change ${email} to ${role}?`)) return;
@@ -2328,6 +2525,102 @@
           });
           mount?.(form);
           setTimeout(() => form.querySelector('input')?.focus(), 0); // Modal.open focuses the first button after onMount
+        },
+      });
+    },
+
+    openAssignRoom({ stay = '', room = '', emails = [] } = {}) {
+      const s = Store.state;
+      const stays = s.stayCatalog.filter((st) => st.status === 'Active');
+      if (!stays.length) { Toast.show('Add a place of stay first.', 'error'); return; }
+      const chosen = new Set(emails);
+      const stayOptions = stays.map((st) => `<option value="${escapeHtml(st.label)}" ${st.label === stay ? 'selected' : ''}>${escapeHtml(st.label)}</option>`).join('');
+      const memberRows = [...s.members].sort((a, b) => Number(chosen.has(b.email)) - Number(chosen.has(a.email)) || naturalSort(a.email, b.email)).map((m) => `
+        <label class="flex min-h-[44px] items-center gap-3 py-1.5" data-member-option="${escapeHtml(m.email)}">
+          <input type="checkbox" name="emails" value="${escapeHtml(m.email)}" ${chosen.has(m.email) ? 'checked' : ''} class="h-5 w-5 accent-kumkum-600" />
+          <span class="min-w-0 flex-1">
+            <span class="block truncate text-sm text-ink-800">${escapeHtml(m.email)}</span>
+            <span class="block text-[11px] text-ink-500">${m.room ? `Now: ${escapeHtml(roomText(m.stay, m.room))}` : 'No room yet'}</span>
+          </span>
+        </label>`).join('');
+      this.openCreateForm({
+        eyebrow: 'Rooms',
+        title: 'Assign a room',
+        submitLabel: 'Assign',
+        key: 'room:assign',
+        fields: `
+          ${field('Place of stay', `<select name="stay" required class="input">${stayOptions}</select>`)}
+          ${field('Room', `<input name="room" maxlength="20" required value="${escapeHtml(room)}" placeholder="e.g. 204" list="room-suggestions" autocomplete="off" class="input" /><datalist id="room-suggestions"></datalist>`)}
+          <fieldset>
+            <legend class="block text-xs font-semibold text-ink-500 mb-1">Members <span data-picked-count class="font-normal"></span></legend>
+            <input type="search" data-member-filter placeholder="Filter by email…" aria-label="Filter members" class="input mb-1 min-h-[44px]" />
+            <div class="max-h-60 overflow-y-auto divide-y divide-haldi-100 rounded-xl border border-haldi-200 bg-ivory-50 px-3">${memberRows}</div>
+          </fieldset>`,
+        collect: (form) => {
+          const picked = [...form.querySelectorAll('input[name="emails"]:checked')].map((i) => i.value);
+          const roomValue = form.elements.room.value.trim();
+          if (!roomValue) { Toast.show('Enter a room.', 'error'); form.elements.room.focus(); return null; }
+          if (!picked.length) { Toast.show('Choose at least one member.', 'error'); return null; }
+          if (picked.length > 30) { Toast.show('Assign up to 30 members at a time.', 'error'); return null; }
+          return { stay: form.elements.stay.value, room: roomValue, emails: picked };
+        },
+        submit: async (payload, key) => {
+          const label = roomText(payload.stay, payload.room);
+          const n = payload.emails.length;
+          const data = await this.run(key, () => Api.post('assignRoom', payload), `${n} member${n === 1 ? '' : 's'} assigned to ${label}`);
+          if (data) Store.set({ members: data.members });
+          return !!data;
+        },
+        mount: (form) => {
+          const list = form.querySelector('#room-suggestions');
+          const count = form.querySelector('[data-picked-count]');
+          const suggest = () => {
+            const rooms = Object.keys(roomsByStay(Store.state.members)[form.elements.stay.value] || {}).sort(naturalSort);
+            list.innerHTML = rooms.map((r) => `<option value="${escapeHtml(r)}"></option>`).join('');
+          };
+          const recount = () => {
+            const n = form.querySelectorAll('input[name="emails"]:checked').length;
+            count.textContent = n ? `· ${n} selected` : '';
+          };
+          form.elements.stay.addEventListener('change', suggest);
+          form.addEventListener('change', (e) => { if (e.target.name === 'emails') recount(); });
+          form.querySelector('[data-member-filter]').addEventListener('input', (e) => {
+            const q = e.target.value.trim().toLowerCase();
+            form.querySelectorAll('[data-member-option]').forEach((row) => { row.classList.toggle('hidden', !!q && !row.dataset.memberOption.includes(q)); });
+          });
+          suggest();
+          recount();
+        },
+      });
+    },
+
+    openRoom(stay, room) {
+      const people = (roomsByStay(Store.state.members)[stay] || {})[room] || [];
+      if (!people.length) { Modal.close(); return; }
+      Modal.open(`
+        <p class="eyebrow">${escapeHtml(stay)}</p>
+        <h3 class="font-display text-2xl text-kumkum-700">Room ${escapeHtml(room)}</h3>
+        <p class="mt-1 text-sm text-ink-600">👥 ${people.length} guest${people.length === 1 ? '' : 's'} staying here</p>
+        <ul class="mt-3 divide-y divide-haldi-100 rounded-xl border border-haldi-200 bg-ivory-50 px-3" data-room-occupants>
+          ${people.map((m) => `<li class="flex min-h-[52px] items-center gap-2 py-2">
+            <span class="min-w-0 flex-1 truncate text-sm text-ink-800">${escapeHtml(m.email)}</span>
+            <button type="button" data-room="move" data-email="${escapeHtml(m.email)}" class="btn btn-ghost btn-sm min-h-[44px]" aria-label="Move ${escapeHtml(m.email)}">Move</button>
+            <button type="button" data-room="clear" data-email="${escapeHtml(m.email)}" class="btn btn-danger btn-sm min-h-[44px]" aria-label="Remove ${escapeHtml(m.email)} from this room">Remove</button>
+          </li>`).join('')}
+        </ul>
+        <div class="mt-3 grid grid-cols-2 gap-2">
+          <button type="button" data-modal="cancel" class="btn btn-ghost min-h-[44px]">Close</button>
+          <button type="button" data-room="add" class="btn btn-primary min-h-[44px]">+ Add guests</button>
+        </div>`, {
+        onMount: (root) => {
+          root.querySelector('[data-modal="cancel"]').addEventListener('click', () => Modal.close());
+          root.querySelector('[data-room="add"]').addEventListener('click', () => this.openAssignRoom({ stay, room }));
+          root.querySelectorAll('[data-room="move"]').forEach((btn) => btn.addEventListener('click', () => this.openAssignRoom({ emails: [btn.dataset.email] })));
+          root.querySelectorAll('[data-room="clear"]').forEach((btn) => btn.addEventListener('click', async () => {
+            btn.disabled = true;
+            if (await this.clearRoom(btn.dataset.email)) this.openRoom(stay, room);
+            else btn.disabled = false;
+          }));
         },
       });
     },
@@ -2539,8 +2832,11 @@
       switch (action) {
         case 'refresh': void Data.refresh(); break;
         case 'open-broadcast': Actions.openBroadcast(id); break;
-        case 'broadcast-send': void Actions.sendBroadcast(false); break;
-        case 'broadcast-whatsapp': void Actions.sendBroadcast(true); break;
+        case 'open-composer': Actions.openComposer(); break;
+        case 'notice-filter': Store.set({ noticeFilter: ['notes', 'events'].includes(el.dataset.value) ? el.dataset.value : 'all' }); break;
+        case 'archive-stay': void Actions.archiveStay(el.dataset.label); break;
+        case 'open-assign-room': Actions.openAssignRoom({ emails: el.dataset.email ? [el.dataset.email] : [] }); break;
+        case 'open-room': Actions.openRoom(el.dataset.stay, el.dataset.room); break;
         case 'add-event': Actions.openAddEvent(); break;
         case 'delete-event': void Actions.deleteEvent(id); break;
         case 'save-event-groups': void Actions.updateEventGroups(id); break;
@@ -2584,10 +2880,6 @@
         Store.state.formGroupsDrafts[groupCheckbox.dataset.id] = checkedGroups(groupCheckbox.closest('fieldset'));
         return;
       }
-      if (groupCheckbox?.dataset.action === 'broadcast-groups') {
-        Store.state.broadcastDraft.groups = checkedGroups(groupCheckbox.closest('fieldset'));
-        return;
-      }
       const roleSel = e.target.closest('select[data-action="set-role"]');
       if (roleSel) {
         const member = Store.state.members.find((m) => m.email === roleSel.dataset.email);
@@ -2609,8 +2901,7 @@
     view.addEventListener('input', (e) => {
       if (e.target.matches('[data-action="pickup-search"]')) Store.set({ pickupSearch: e.target.value });
       if (e.target.matches('[data-action="member-search"]')) Store.set({ memberSearch: e.target.value });
-      if (e.target.matches('[data-action="broadcast-title"]')) Store.state.broadcastDraft.title = e.target.value;
-      if (e.target.matches('[data-action="broadcast-body"]')) Store.state.broadcastDraft.body = e.target.value;
+      if (e.target.matches('[data-action="room-search"]')) Store.set({ roomSearch: e.target.value });
     });
 
     view.addEventListener('submit', (e) => {
@@ -2619,6 +2910,7 @@
       e.preventDefault();
       if (form.dataset.action === 'add-member') void Actions.addMember(form);
       if (form.dataset.action === 'add-group') void Actions.addGroup(form);
+      if (form.dataset.action === 'add-stay') void Actions.addStay(form);
     });
 
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !Tour.active && !Welcome.open) Modal.close(); });
@@ -2628,7 +2920,7 @@
       if (Store.state.authStatus === 'authed' && !Auth.restoreOffline()) {
         Store.set({
           authStatus: 'offline', role: GUEST_ROLE, isAdmin: false, itinerary: [], logistics: [], members: [], formResponses: null, formGroupsDrafts: {},
-          myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {},
+          myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], stayCatalog: [], myRoom: null, roomSearch: '', pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {},
         });
       }
     });

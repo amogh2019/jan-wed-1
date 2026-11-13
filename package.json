@@ -6,7 +6,7 @@
   "scripts": {
     "build:css": "tailwindcss -c tailwind.config.js -i src/styles.css -o styles.css --minify",
     "sync:config": "node scripts/sync-config.js",
-    "test": "node --test tests/backend.test.js tests/form-onboarding.test.js tests/config-sync.test.js",
+    "test": "node --test tests/backend.test.js tests/form-onboarding.test.js tests/rooms.test.js tests/config-sync.test.js",
     "test:e2e": "node tests/e2e.smoke.js"
   },
   "devDependencies": {
