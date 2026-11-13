@@ -1907,11 +1907,10 @@
 
   const myRoomCard = (r) => `<section class="card relative overflow-hidden p-5 text-center mb-4" data-my-room-card>
         <div class="toran absolute inset-x-0 top-0" aria-hidden="true"></div>
-        <p class="eyebrow mt-2">Place of stay</p>
+        <p class="eyebrow mt-2">My Place of Stay</p>
         <p class="font-display text-2xl text-kumkum-700">${escapeHtml(r.stay || 'To be confirmed')}</p>
         <p class="eyebrow mt-4">Room</p>
         <p class="font-display text-5xl text-kumkum-800" data-my-room>${escapeHtml(r.room)}</p>
-        <p class="mt-4 text-sm text-ink-600">Need help with your room? Please reach out to the family.</p>
       </section>`;
 
   const guestRoomView = (s) => `
@@ -1954,7 +1953,6 @@
     const filteredUnassigned = unassigned.filter((m) => !q || m.email.includes(q));
     return `
       ${pageHeader('Stay & rooms', 'Rooms', 'Add places of stay, then assign members to rooms. Several members can share a room. Every change is recorded in the AuditLog.', 'rooms-overview')}
-      ${s.myRoom ? myRoomCard(s.myRoom) : ''}
       <div class="grid grid-cols-3 gap-2 text-center mb-4">${stat(roomCount, 'Rooms')}${stat(assigned, 'Assigned')}${stat(unassigned.length, 'Unassigned')}</div>
       <details data-stay-manager ${s.stayManagerOpen || !s.stayCatalog.length ? 'open' : ''} class="group card mb-4 p-0">
         <summary class="flex min-h-[56px] cursor-pointer list-none items-center justify-between gap-2 p-4">
@@ -1991,7 +1989,8 @@
             <button type="button" data-action="open-assign-room" data-email="${escapeHtml(m.email)}" ${activeStays.length ? '' : 'disabled'} class="btn btn-ghost btn-sm shrink-0 min-h-[44px]" aria-label="Assign a room to ${escapeHtml(m.email)}">Assign</button>
           </li>`).join('') || '<li class="py-3 text-xs text-ink-500">No matching members.</li>'}
         </ul>
-      </section>` : ''}`;
+      </section>` : ''}
+      ${s.myRoom ? myRoomCard(s.myRoom) : ''}`;
   };
 
   /* --------------------------------------------------------------- Render */

@@ -201,6 +201,7 @@ Do these in order (each step is reversible until the last):
 
 ## 11. Changelog
 
+- **v1.8.4** Rooms: the admin’s own room card moves to the bottom of the Rooms tab (after “Without a room”). The room card says “My Place of Stay” and no longer shows the “Need help” line (also for Atithis). Cache `v1.8.4`.
 - **v1.8.3** Rooms: Atithis see the tab and page as “My Room”; “My Travel” is now “My Travel”. Admins who have a room see their own My Room card at the top of the Rooms tab. The global “Assign a room” button is removed; rooms are assigned from each member’s Assign button. Cache `v1.8.3`.
 - **v1.8.2** Rooms: the “Places of stay” label/add card at the top is collapsible (▾ header showing how many are added). It starts open only while no place exists and keeps its state across refreshes. Cache `v1.8.2`.
 - **v1.8.1** Rooms: places of stay and Google Form sign-ups get the highlighted card style; “Without a room” is always expanded. Admin Notices no longer show push-failure chips or per-notice “Failed” text (the failure is still stored in the sheet). Cache `v1.8.1`.

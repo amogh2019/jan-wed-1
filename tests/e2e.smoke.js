@@ -554,6 +554,13 @@ async function assertTourStep(page, id, tab, target = null) {
     await enter(roomAdminPage);
     await roomAdminPage.click('[data-tab="rooms"]');
     assert(await roomAdminPage.textContent('[data-my-room-card] [data-my-room]') === '301', 'an admin with a room sees their own My Room card on the Rooms tab');
+    assert(await roomAdminPage.evaluate(() => {
+      const card = document.querySelector('[data-my-room-card]');
+      const unassigned = document.querySelector('[data-unassigned]');
+      return !unassigned || !!(unassigned.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING);
+    }), 'the admin My Room card sits after the Without a room section');
+    const roomCardText = await roomAdminPage.textContent('[data-my-room-card]');
+    assert(roomCardText.includes('My Place of Stay') && !roomCardText.includes('Need help'), 'room card is labelled My Place of Stay without the help line');
     assert((await roomAdminPage.textContent('[data-tab="rooms"]')).trim() === 'Rooms', 'admins keep the Rooms tab label');
     await roomAdminPage.close();
 
