@@ -504,11 +504,13 @@ async function assertTourStep(page, id, tab, target = null) {
     await enter(roomPage);
     await roomPage.click('[data-tab="rooms"]');
     await roomPage.waitForSelector('#view >> text=No places of stay yet');
-    assert(await roomPage.isDisabled('[data-action="open-assign-room"]'), 'room assignment waits for a place of stay');
+    assert(await roomPage.isDisabled('[data-unassigned] [data-action="open-assign-room"][data-email="viewer@gmail.com"]'), 'room assignment waits for a place of stay');
+    assert(await roomPage.isHidden('#view button[data-action="open-assign-room"]:not([data-email])'), 'there is no global assign button, only one per member');
+    assert(await roomPage.isHidden('[data-my-room-card]'), 'admin without a room has no My Room card');
     await roomPage.fill('form[data-action="add-stay"] input[name="label"]', 'Hotel Leela');
     await roomPage.click('form[data-action="add-stay"] button[type="submit"]');
     await roomPage.waitForSelector('#view >> text=Hotel Leela');
-    await roomPage.click('#view button[data-action="open-assign-room"]:not([data-email])');
+    await roomPage.click('[data-unassigned] [data-action="open-assign-room"][data-email="viewer@gmail.com"]');
     await roomPage.waitForSelector('#modal-root select[name="stay"]');
     await roomPage.fill('#modal-root input[name="room"]', '204');
     await roomPage.fill('#modal-root [data-member-filter]', 'viewer');
@@ -543,12 +545,26 @@ async function assertTourStep(page, id, tab, target = null) {
     assert(roomBackend.audit.length === 3, 'every room mutation reaches the audited admin backend');
     await roomPage.close();
 
+    const roomAdmin = roomBackend.members.find((m) => m.email === 'admin@gmail.com');
+    roomAdmin.stay = 'Hotel Leela';
+    roomAdmin.room = '301';
+    const roomAdminPage = await newPage(browser, roomBackend);
+    await roomAdminPage.waitForSelector('#fake-gsi');
+    await signIn(roomAdminPage, 'admin@gmail.com');
+    await enter(roomAdminPage);
+    await roomAdminPage.click('[data-tab="rooms"]');
+    assert(await roomAdminPage.textContent('[data-my-room-card] [data-my-room]') === '301', 'an admin with a room sees their own My Room card on the Rooms tab');
+    assert((await roomAdminPage.textContent('[data-tab="rooms"]')).trim() === 'Rooms', 'admins keep the Rooms tab label');
+    await roomAdminPage.close();
+
     const roomGuestPage = await newPage(browser, roomBackend);
     await roomGuestPage.waitForSelector('#fake-gsi');
     await signIn(roomGuestPage, 'viewer@gmail.com');
     await enter(roomGuestPage);
     await roomGuestPage.waitForSelector('[data-tab="rooms"]:not(.hidden)');
     await roomGuestPage.click('[data-tab="rooms"]');
+    assert((await roomGuestPage.textContent('[data-tab="rooms"]')).trim() === 'My Room', 'Atithis see the tab as My Room');
+    assert((await roomGuestPage.textContent('#view h2, #view h1')).includes('My Room'), 'Atithi room page is titled My Room');
     assert(await roomGuestPage.textContent('#view [data-my-room]') === '204', 'guest sees their own room number');
     assert((await roomGuestPage.textContent('#view')).includes('Hotel Leela') && !(await roomGuestPage.textContent('#view')).includes('beta@gmail.com'),
       'guest sees their place of stay but not other occupants');
@@ -807,7 +823,7 @@ async function assertTourStep(page, id, tab, target = null) {
     assert(backend.notifications.length === 1, 'clear hides announcements for this member without deleting history');
 
     console.log('Guest sees their own pick-up & drop');
-    assert(await visible(page, '#bottom-nav'), 'guests get a Schedule + My travel nav');
+    assert(await visible(page, '#bottom-nav'), 'guests get a Schedule + My Travel nav');
     assert(!(await visible(page, '[data-tab="pickups"]')) && !(await visible(page, '[data-tab="members"]')), 'no admin tabs for guests');
     await page.click('[data-tab="travel"]');
     await page.waitForSelector('#view >> text=Verma family');
@@ -829,7 +845,7 @@ async function assertTourStep(page, id, tab, target = null) {
     await enter(page);
     assert(!(await page.$('#tour-root')), 'no tour for a member who already completed it');
     assert((await page.textContent('#app-title-text')) === 'Test Fest', 'full event name in the header');
-    assert(!(await visible(page, '[data-tab="travel"]')), 'admins use Pick & Drop instead of My travel');
+    assert(!(await visible(page, '[data-tab="travel"]')), 'admins use Pick & Drop instead of My Travel');
     await page.waitForSelector('[data-tab="members"]:not(.hidden)');
 
     console.log('Admin manages group labels');

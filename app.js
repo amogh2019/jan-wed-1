@@ -1668,15 +1668,15 @@
         </div>
       </div>`;
 
-    if (s.authStatus === 'offline') return `${pageHeader('Your journey', 'My travel', '', 'travel-overview')}${emptyState('📶', 'You’re offline', 'Connect to the internet to see your pick-up and drop.')}${contactCard}`;
+    if (s.authStatus === 'offline') return `${pageHeader('Your journey', 'My Travel', '', 'travel-overview')}${emptyState('📶', 'You’re offline', 'Connect to the internet to see your pick-up and drop.')}${contactCard}`;
     if (!s.myTravel.length) {
       return `
-        ${pageHeader('Your journey', 'My travel', '', 'travel-overview')}
+        ${pageHeader('Your journey', 'My Travel', '', 'travel-overview')}
         ${emptyState('🚐', 'No travel plans yet', 'Once the family adds your arrival, your pick-up and drop will show up here.')}
         ${contactCard}`;
     }
     return `
-      ${pageHeader('Your journey', 'My travel', 'We will be there to receive you and to see you off. 🌼', 'travel-overview')}
+      ${pageHeader('Your journey', 'My Travel', 'We will be there to receive you and to see you off. 🌼', 'travel-overview')}
       <div class="space-y-3">
         ${s.myTravel.map((g) => `
           <article class="card p-4 space-y-3">
@@ -1905,19 +1905,18 @@
 
   Views.rooms = (s) => (s.isAdmin ? adminRoomsView(s) : guestRoomView(s));
 
-  const guestRoomView = (s) => {
-    const r = s.myRoom;
-    return `
-      ${pageHeader('Your stay', 'My room', 'Where you are staying during the celebration.', 'rooms-overview')}
-      ${r ? `<section class="card relative overflow-hidden p-5 text-center">
+  const myRoomCard = (r) => `<section class="card relative overflow-hidden p-5 text-center mb-4" data-my-room-card>
         <div class="toran absolute inset-x-0 top-0" aria-hidden="true"></div>
         <p class="eyebrow mt-2">Place of stay</p>
         <p class="font-display text-2xl text-kumkum-700">${escapeHtml(r.stay || 'To be confirmed')}</p>
         <p class="eyebrow mt-4">Room</p>
         <p class="font-display text-5xl text-kumkum-800" data-my-room>${escapeHtml(r.room)}</p>
         <p class="mt-4 text-sm text-ink-600">Need help with your room? Please reach out to the family.</p>
-      </section>` : emptyState('🏨', 'No room assigned yet', 'Your room will appear here once the family assigns it.')}`;
-  };
+      </section>`;
+
+  const guestRoomView = (s) => `
+      ${pageHeader('Your stay', 'My Room', 'Where you are staying during the celebration.', 'rooms-overview')}
+      ${s.myRoom ? myRoomCard(s.myRoom) : emptyState('🏨', 'No room assigned yet', 'Your room will appear here once the family assigns it.')}`;
 
   const adminRoomsView = (s) => {
     const q = s.roomSearch.trim().toLowerCase();
@@ -1955,6 +1954,7 @@
     const filteredUnassigned = unassigned.filter((m) => !q || m.email.includes(q));
     return `
       ${pageHeader('Stay & rooms', 'Rooms', 'Add places of stay, then assign members to rooms. Several members can share a room. Every change is recorded in the AuditLog.', 'rooms-overview')}
+      ${s.myRoom ? myRoomCard(s.myRoom) : ''}
       <div class="grid grid-cols-3 gap-2 text-center mb-4">${stat(roomCount, 'Rooms')}${stat(assigned, 'Assigned')}${stat(unassigned.length, 'Unassigned')}</div>
       <details data-stay-manager ${s.stayManagerOpen || !s.stayCatalog.length ? 'open' : ''} class="group card mb-4 p-0">
         <summary class="flex min-h-[56px] cursor-pointer list-none items-center justify-between gap-2 p-4">
@@ -1978,12 +1978,11 @@
         </ul>` : emptyState('🏨', 'No places of stay yet', 'Add one to start assigning rooms.')}
         </div>
       </details>
-      <button type="button" data-action="open-assign-room" ${activeStays.length && s.members.length ? '' : 'disabled'} class="btn btn-primary w-full min-h-[48px] mb-4">🛏️ Assign a room</button>
       <div class="relative mb-4">
         <span class="pointer-events-none absolute inset-y-0 left-3 grid place-items-center text-ink-400" aria-hidden="true">⌕</span>
         <input type="search" data-action="room-search" value="${escapeHtml(s.roomSearch)}" placeholder="Search room, place or email…" aria-label="Search rooms" class="input min-h-[48px] pl-10" />
       </div>
-      ${staySections || emptyState('🛏️', assigned ? 'No matching rooms' : 'No rooms assigned yet', assigned ? '' : 'Use “Assign a room” to place members in rooms.')}
+      ${staySections || emptyState('🛏️', assigned ? 'No matching rooms' : 'No rooms assigned yet', assigned ? '' : activeStays.length ? 'Tap “Assign” next to a member to place them in a room.' : 'Add a place of stay first, then assign members to rooms.')}
       ${unassigned.length ? `<section data-unassigned class="card mb-4 px-4">
         <h3 class="flex min-h-[48px] items-center py-3 text-sm font-semibold text-ink-700">Without a room · ${unassigned.length}</h3>
         <ul class="divide-y divide-haldi-100 border-t border-haldi-100 pb-2">
@@ -2068,6 +2067,8 @@
       const active = btn.dataset.tab === s.tab;
       btn.classList.toggle('text-kumkum-700', active);
       btn.classList.toggle('text-ink-500', !active);
+      const label = btn.querySelector('[data-nav-label]');
+      if (label && btn.dataset.tab === 'rooms') label.textContent = s.isAdmin ? 'Rooms' : 'My Room';
       const pill = btn.querySelector('.nav-pill');
       if (pill) { pill.classList.toggle('bg-kumkum-100', active); pill.classList.toggle('bg-transparent', !active); }
       btn.setAttribute('aria-current', active ? 'page' : 'false');
@@ -2712,7 +2713,7 @@
             ${field('Guests', `<input name="members" type="number" inputmode="numeric" min="1" max="500" placeholder="4" value="${attr(g.members)}" class="input" />`)}
             ${field('Contact', `<input name="contact" type="tel" inputmode="tel" maxlength="30" placeholder="+91 98765 43210" value="${attr(g.contact)}" class="input" />`)}
           </div>
-          ${field('Guest’s Google email (so they see it in “My travel”)', `<input name="email" type="email" inputmode="email" maxlength="254" list="travel-guests" placeholder="guest@gmail.com" value="${attr(g.email)}" class="input" />
+          ${field('Guest’s Google email (so they see it in “My Travel”)', `<input name="email" type="email" inputmode="email" maxlength="254" list="travel-guests" placeholder="guest@gmail.com" value="${attr(g.email)}" class="input" />
             <datalist id="travel-guests">${guests.map((e) => `<option value="${attr(e)}"></option>`).join('')}</datalist>`)}
           ${field('Arrival (pick-up)', `<input name="arrival" type="datetime-local" value="${attr(toLocalInput(g.arrival))}" class="input" />${keepNote(g.arrival)}`)}
           ${field('Departure (drop)', `<input name="departure" type="datetime-local" value="${attr(toLocalInput(g.departure))}" class="input" />${keepNote(g.departure)}`)}
