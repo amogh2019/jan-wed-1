@@ -220,7 +220,7 @@ test('tour: works on a legacy Members sheet with no tour columns and only touche
   assert.equal(out.ok, true);
   assert.equal(out.data.tourStatus, 'Skipped');
   const [header, adminRow, viewerRow] = b.sheets.Members.data;
-  assert.deepEqual(header, ['Email', 'Role', 'AddedBy', 'AddedDate', 'TourStatus', 'TourCompletedAt', 'Groups', 'NotificationsClearedAt', 'Stay', 'Room']);
+  assert.deepEqual(header, ['Email', 'Role', 'AddedBy', 'AddedDate', 'TourStatus', 'TourCompletedAt', 'Groups', 'NotificationsClearedAt', 'Stay', 'Room', 'Name']);
   assert.equal(viewerRow[4], 'Skipped');
   assert.equal(Object.prototype.toString.call(viewerRow[5]), '[object Date]');
   assert.ok(adminRow[4] === undefined || adminRow[4] === '', 'other members untouched');
@@ -248,7 +248,7 @@ test('setup: creates missing tabs and headers on an empty workbook', () => {
   const b = createBackend({ members: [], overrides: { Itinerary: null, Logistics: null, Members: null, AuditLog: null } });
   b.sandbox.setup();
   assert.deepEqual(b.sheets.Itinerary.data[0], ['EventID', 'Day', 'Time', 'Title', 'Location', 'Status', 'MapLink', 'Group']);
-  assert.deepEqual(b.sheets.Members.data[0], ['Email', 'Role', 'AddedBy', 'AddedDate', 'TourStatus', 'TourCompletedAt', 'Groups', 'NotificationsClearedAt', 'Stay', 'Room']);
+  assert.deepEqual(b.sheets.Members.data[0], ['Email', 'Role', 'AddedBy', 'AddedDate', 'TourStatus', 'TourCompletedAt', 'Groups', 'NotificationsClearedAt', 'Stay', 'Room', 'Name']);
   assert.deepEqual(b.sheets.Notifications.data[0], ['Timestamp', 'Title', 'Message', 'EventID', 'Groups', 'SentBy', 'PushStatus']);
   assert.deepEqual(b.sheets.Groups?.data?.[0], ['Label', 'Status']);
   assert.deepEqual(b.sheets.Stays?.data?.[0], ['Label', 'Status']);
@@ -373,7 +373,7 @@ test('setup: existing data is preserved; missing columns appended; only blank ce
   assert.notEqual(JSON.stringify(it), before);
 
   const m = b.sheets.Members.data;
-  assert.deepEqual(m[0].slice(4), ['TourStatus', 'TourCompletedAt', 'Groups', 'NotificationsClearedAt', 'Stay', 'Room'], 'new columns appended to the right');
+  assert.deepEqual(m[0].slice(4), ['TourStatus', 'TourCompletedAt', 'Groups', 'NotificationsClearedAt', 'Stay', 'Room', 'Name'], 'new columns appended to the right');
   assert.equal(m[2][1], 'Atithi', 'blank role defaulted');
   assert.equal(m[1][4], 'Pending');
   assert.equal(m.length, 3, 'owner not re-seeded when Members already has people');

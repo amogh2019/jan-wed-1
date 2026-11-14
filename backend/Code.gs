@@ -66,7 +66,8 @@ var OPTIONAL_HEADERS = {
   Itinerary: ['MapLink', 'Group'],
   // Groups: the member's labels; NotificationsClearedAt: when they last tapped "Clear" in Notifications.
   // Stay/Room: the member's room assignment (one per member; several members may share a room).
-  Members: ['TourStatus', 'TourCompletedAt', 'Groups', 'NotificationsClearedAt', 'Stay', 'Room'],
+  // Name: the member's Google display name, saved once on their first sign-in and never overwritten.
+  Members: ['TourStatus', 'TourCompletedAt', 'Groups', 'NotificationsClearedAt', 'Stay', 'Room', 'Name'],
   // Email links a travel row to the Atithi who sees it on "My travel"; DropStatus tracks the departure drop-off.
   Logistics: ['Email', 'DropStatus'],
 };
@@ -137,7 +138,10 @@ function doPost(e) {
     var user = authenticate_(req);
     var admin = user.role === ROLES.ADMIN;
 
-    if (req.action === 'session') return jsonOut_({ ok: true, data: buildSession_(user, admin) });
+    if (req.action === 'session') {
+      saveOwnNameOnce_(user, req);
+      return jsonOut_({ ok: true, data: buildSession_(user, admin) });
+    }
 
     var memberAction = resolveAction_(req.action, user, admin);
     var handler = memberAction ? MEMBER_ACTIONS_[req.action] : ACTIONS_[req.action];
@@ -166,7 +170,33 @@ function authenticate_(req) {
   user.notificationsClearedAt = member.notificationsClearedAt;
   user.stay = member.stay;
   user.room = member.room;
+  user.savedName = member.name;
   return user;
+}
+
+var MAX_NAME_LEN = 100;
+
+/**
+ * First sign-in only: stores the verified Google display name in the member's blank Name cell.
+ * Never overwrites an existing name, never trusts client input, and never blocks sign-in.
+ * Not audited: it is a self-service profile fill, not an admin change.
+ */
+function saveOwnNameOnce_(user, req) {
+  if (user.savedName) return;
+  var name = String(user.name || '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, MAX_NAME_LEN);
+  if (!name) return;
+  try {
+    runLocked_(function (payload, u) {
+      ensureColumns_(SHEETS.MEMBERS, OPTIONAL_HEADERS.Members);
+      var table = readTable_(SHEETS.MEMBERS);
+      var row = findMemberRow_(table, u.email);
+      if (row && !String(row.values.Name == null ? '' : row.values.Name).trim()) setCell_(table, row, 'Name', name);
+      return null;
+    }, true, user, req);
+    user.savedName = name;
+  } catch (err) {
+    // Saving the name is best-effort; the member must still be able to sign in.
+  }
 }
 
 /** Validates the action name and admin rights. Returns true for member (non-admin) actions. */
@@ -1449,6 +1479,7 @@ function readMembers_() {
         notificationsClearedAt: toIso_(r.values.NotificationsClearedAt),
         stay: String(r.values.Stay == null ? '' : r.values.Stay).trim(),
         room: String(r.values.Room == null ? '' : r.values.Room).trim(),
+        name: String(r.values.Name == null ? '' : r.values.Name).trim(),
       };
     })
     .filter(function (m) { return m.email; });

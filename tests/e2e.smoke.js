@@ -51,8 +51,8 @@ window.OneSignalDeferred = { push(callback) {
 
 function makeBackend() {
   const members = [
-    { email: 'admin@gmail.com', role: 'Admin', addedBy: 'setup()', addedDate: '', tourStatus: 'Completed', groups: [] },
-    { email: 'viewer@gmail.com', role: 'Viewer', addedBy: 'admin@gmail.com', addedDate: '', tourStatus: 'Completed', groups: [] },
+    { email: 'admin@gmail.com', role: 'Admin', addedBy: 'setup()', addedDate: '', tourStatus: 'Completed', groups: [], googleName: 'Host Admin' },
+    { email: 'viewer@gmail.com', role: 'Viewer', addedBy: 'admin@gmail.com', addedDate: '', tourStatus: 'Completed', groups: [], name: 'Asha Verma' },
   ];
   const itinerary = [{ id: '1', day: 'Fri', time: '10:00', title: 'Welcome', location: 'Hall',
     mapLink: 'https://maps.app.goo.gl/welcome123', status: 'Upcoming', groups: [] }];
@@ -91,6 +91,7 @@ function makeBackend() {
       if (!m) return { ok: false, code: 'NOT_MEMBER', error: 'This Google account is not on the guest list.' };
       const isAdmin = m.role === 'Admin';
       if (body.action === 'session') {
+        if (!m.name && m.googleName) m.name = m.googleName; // the backend saves the verified Google name once
         const myTravel = logistics.filter((g) => g.email === me);
         const myGroups = m.groups || [];
         const matching = (groups) => !groups?.length || groups.some((g) => myGroups.some((mine) => mine.toLowerCase() === g.toLowerCase()));
@@ -854,6 +855,8 @@ async function assertTourStep(page, id, tab, target = null) {
     await enter(page);
     assert(!(await page.$('#tour-root')), 'no tour for a member who already completed it');
     assert((await page.textContent('#app-title-text')) === 'Test Fest', 'full event name in the header');
+    const tint = await page.evaluate(() => { const el = document.getElementById('warm-tint'); const c = el && getComputedStyle(el); return c && { pe: c.pointerEvents, blend: c.mixBlendMode, pos: c.position }; });
+    assert(tint && tint.pe === 'none' && tint.blend === 'multiply' && tint.pos === 'fixed', 'a fixed, click-through multiply tint covers the app');
     assert(!(await visible(page, '[data-tab="travel"]')), 'admins use Pick & Drop instead of My Travel');
     await page.waitForSelector('[data-tab="members"]:not(.hidden)');
 
@@ -864,6 +867,13 @@ async function assertTourStep(page, id, tab, target = null) {
       'member search has a visible label');
     assert((await page.textContent('[data-member-search-count]')).includes('2 of 2'),
       'member search initially reports every member');
+    assert(await page.locator('[data-member-name]').count() === 2, 'member cards show the saved names');
+    assert(await page.evaluate(() => [...document.querySelectorAll('#view li')].filter((li) => li.querySelector('[data-member-name]'))
+      .every((li) => !!(li.querySelector('[data-member-name]').compareDocumentPosition([...li.querySelectorAll('p')].find((p) => p.textContent.includes('Added by'))) & Node.DOCUMENT_POSITION_FOLLOWING))),
+    'the name bullet comes before "Added by"');
+    assert((await page.textContent('[data-member-name]')).includes('Host Admin'), 'the Google name captured on sign-in is shown');
+    await page.fill('[data-action="member-search"]', 'verma');
+    assert((await page.textContent('[data-member-search-count]')).includes('1 of 2'), 'member search also matches saved names');
     await page.fill('[data-action="member-search"]', 'atithi');
     assert((await page.textContent('[data-member-search-count]')).includes('0 of 2'),
       'member search ignores role text');

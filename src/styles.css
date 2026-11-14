@@ -27,6 +27,9 @@
     background-attachment: fixed;
   }
   :focus-visible { outline: 3px solid #f98c07; outline-offset: 2px; border-radius: 0.5rem; }
+  /* Warm "reading mode" wash over the whole app; an overlay (not a filter) so fixed UI keeps working. */
+  #warm-tint { position: fixed; inset: 0; z-index: 2147483647; pointer-events: none; background: rgb(255 176 56 / .22); mix-blend-mode: multiply; }
+  @media print, (forced-colors: active) { #warm-tint { display: none; } }
   ::selection { background: #ffdb8a; color: #4a0d1a; }
 }
 

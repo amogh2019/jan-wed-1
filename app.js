@@ -1732,7 +1732,7 @@
   Views.members = (s) => {
     const me = s.user?.email;
     const q = s.memberSearch.trim().toLowerCase();
-    const list = s.members.filter((m) => !q || m.email.includes(q));
+    const list = s.members.filter((m) => !q || m.email.includes(q) || String(m.name || '').toLowerCase().includes(q));
     const adminCount = s.members.filter((m) => m.role === 'Admin').length;
     const roleOptions = (current) => ROLES.map((r) => `<option value="${r}" ${r === current ? 'selected' : ''}>${r}</option>`).join('');
     const stat = (n, label) => `<div class="card py-2"><p class="font-display text-xl text-kumkum-700">${n}</p><p class="text-[11px] text-ink-500">${label}</p></div>`;
@@ -1757,6 +1757,7 @@
             <div class="w-9 h-9 shrink-0 rounded-full ${m.role === 'Admin' ? 'bg-kumkum-100 text-kumkum-700' : 'bg-haldi-100 text-haldi-800'} grid place-items-center font-bold">${escapeHtml(m.email[0]?.toUpperCase() || '?')}</div>
             <div class="flex-1 min-w-0">
               <p class="text-sm font-medium text-ink-900 truncate">${escapeHtml(m.email)} ${self ? '<span class="ml-1 rounded-full bg-kumkum-600 text-ivory-50 text-[10px] px-2 py-0.5">You</span>' : ''}</p>
+              ${m.name ? `<p class="text-xs text-ink-400 truncate" data-member-name>· ${escapeHtml(m.name)}</p>` : ''}
               <p class="text-xs text-ink-400 truncate">· Added by ${escapeHtml(m.addedBy || '—')}</p>
               <p class="text-xs text-ink-400 truncate">${addedLine(m)}</p>
               <p class="text-xs text-ink-400 truncate"> ${tourChip(m.tourStatus)}</p>
@@ -1838,7 +1839,7 @@
         </div>
         <div class="relative mt-3">
           <span class="pointer-events-none absolute inset-y-0 left-3 grid place-items-center text-ink-400" aria-hidden="true">⌕</span>
-          <input type="search" data-action="member-search" value="${escapeHtml(s.memberSearch)}" placeholder="Search by email…" aria-label="Search members by email" class="input min-h-[48px] pl-10 ${q ? 'pr-20' : ''}" />
+          <input type="search" data-action="member-search" value="${escapeHtml(s.memberSearch)}" placeholder="Search by email or name…" aria-label="Search members by email or name" class="input min-h-[48px] pl-10 ${q ? 'pr-20' : ''}" />
           ${q ? '<button type="button" data-action="member-search-clear" class="absolute inset-y-1 right-1 rounded-lg px-3 text-xs font-semibold text-kumkum-700 hover:bg-kumkum-50">Clear</button>' : ''}
         </div>
       </section>

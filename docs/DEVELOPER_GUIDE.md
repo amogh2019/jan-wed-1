@@ -39,7 +39,7 @@ Tab names and required columns (exact header text; case/space differences are to
 |---|---|---|
 | `Itinerary` | EventID, Day, Time, Title, Location, Status (`Upcoming`/`Live`/`Completed`) | MapLink (Google Maps link), Group (comma-separated audience labels; blank means everyone) |
 | `Logistics` | ID, Name, Members, Contact, ArrivalDateTime, DepartureDateTime, Mode, PickupStatus (`Pending`/`Picked Up`) | Email (guest's Google email → their "My Travel" tab), DropStatus (`Pending`/`Dropped Off`, backfilled `Pending`) |
-| `Members` | Email, Role (`Admin`/`Atithi`; legacy `Viewer` = Atithi), AddedBy, AddedDate | TourStatus (`Pending`/`Completed`/`Skipped`), TourCompletedAt, Groups (comma-separated labels), NotificationsClearedAt, Stay (place-of-stay label), Room (room number/name, ≤20 chars) |
+| `Members` | Email, Role (`Admin`/`Atithi`; legacy `Viewer` = Atithi), AddedBy, AddedDate | TourStatus (`Pending`/`Completed`/`Skipped`), TourCompletedAt, Groups (comma-separated labels), NotificationsClearedAt, Name (Google display name, saved once at first sign-in), Stay (place-of-stay label), Room (room number/name, ≤20 chars) |
 | `AuditLog` | Timestamp, UserEmail, ActionCategory, Details | |
 | `Notifications` | Timestamp, Title, Message, EventID, Groups, SentBy, PushStatus (created by `setup()`; one row per app announcement) | |
 | `Groups` | Label, Status (`Active`/`Archived`; created by `setup()`) | |
@@ -201,6 +201,7 @@ Do these in order (each step is reversible until the last):
 
 ## 11. Changelog
 
+- **v1.8.5** Warm “reading mode” tint: a fixed click-through `#warm-tint` multiply overlay (always on; off for print/forced-colors). Members: optional `Name` column, saved once from the verified Google token at a member’s first sign-in (set-once, never overwritten, best-effort, not audited); shown on the admin member card before “Added by” and searchable. Needs an Apps Script redeploy (run `setup()`). Cache `v1.8.5`.
 - **v1.8.4** Rooms: the admin’s own room card moves to the bottom of the Rooms tab (after “Without a room”). The admin’s room card says “My Place of Stay” (Atithis see “Place of Stay”) and omits the “Need help with your room?” line (Atithis still see it). Cache `v1.8.4`.
 - **v1.8.3** Rooms: Atithis see the tab and page as “My Room”; “My Travel” is now “My Travel”. Admins who have a room see their own My Room card at the top of the Rooms tab. The global “Assign a room” button is removed; rooms are assigned from each member’s Assign button. Cache `v1.8.3`.
 - **v1.8.2** Rooms: the “Places of stay” label/add card at the top is collapsible (▾ header showing how many are added). It starts open only while no place exists and keeps its state across refreshes. Cache `v1.8.2`.
