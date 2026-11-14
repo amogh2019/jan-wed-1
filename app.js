@@ -1819,7 +1819,6 @@
       <details data-section="member-invite" data-member-invite ${s.memberInviteOpen ? 'open' : ''} class="group relative mb-4 overflow-hidden rounded-3xl border-2 border-marigold-300 bg-gradient-to-br from-marigold-50 via-ivory-50 to-haldi-50 shadow-card">
         <summary class="relative flex min-h-[64px] cursor-pointer list-none items-center justify-between gap-3 p-4">
           <div class="flex items-start gap-3">
-          <div class="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-marigold-100 text-xl" aria-hidden="true">✉️</div>
           <div>
             <p class="eyebrow">New access</p>
             <h3 class="font-display text-xl text-kumkum-700">Invite a member</h3>
