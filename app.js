@@ -158,6 +158,8 @@
       formResponses: null, formGroupsDrafts: {}, // admin: sign-ups read from the Google Form tab (loaded on demand)
       openEventControls: new Set(),
       stayManagerOpen: false,
+      groupManagerOpen: false,
+      memberInviteOpen: false,
       openMemberGroups: new Set(),
       tourStatus: 'Completed', // real value arrives with the session; never tour before that
       pending: new Set(), // keys of in-flight admin actions
@@ -468,7 +470,7 @@
       storage.remove(STORAGE.CREDENTIAL);
       storage.remove(STORAGE.LAST_USER);
       storage.remove(STORAGE.DATA_CACHE);
-      Store.set({ user: null, role: null, isAdmin: false, loading: false, itinerary: [], logistics: [], members: [], formResponses: null, formGroupsDrafts: {}, myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], stayCatalog: [], myRoom: null, roomSearch: '', pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openEventControls: new Set(), stayManagerOpen: false, openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, familyContact: null, tab: 'schedule', lastSynced: null, ...patch });
+      Store.set({ user: null, role: null, isAdmin: false, loading: false, itinerary: [], logistics: [], members: [], formResponses: null, formGroupsDrafts: {}, myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], stayCatalog: [], myRoom: null, roomSearch: '', pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openEventControls: new Set(), stayManagerOpen: false, groupManagerOpen: false, memberInviteOpen: false, openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, familyContact: null, tab: 'schedule', lastSynced: null, ...patch });
     },
 
     deny(email) {
@@ -484,7 +486,7 @@
       void Push.logout();
       sessionStore.remove(STORAGE.CREDENTIAL);
       // Admin-only data must not linger on screen after the session ends.
-      Store.set({ authStatus: 'signed-out', user: null, isAdmin: false, role: null, logistics: [], members: [], formResponses: null, formGroupsDrafts: {}, myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], stayCatalog: [], myRoom: null, roomSearch: '', pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openEventControls: new Set(), stayManagerOpen: false, openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, loading: false, tab: 'schedule' });
+      Store.set({ authStatus: 'signed-out', user: null, isAdmin: false, role: null, logistics: [], members: [], formResponses: null, formGroupsDrafts: {}, myTravel: [], notifications: [], groups: [], knownGroups: [], groupCatalog: [], stayCatalog: [], myRoom: null, roomSearch: '', pushId: '', eventGroupsDrafts: {}, memberGroupsDrafts: {}, openEventControls: new Set(), stayManagerOpen: false, groupManagerOpen: false, memberInviteOpen: false, openMemberGroups: new Set(), broadcastDraft: { title: '', body: '', groups: [] }, loading: false, tab: 'schedule' });
       Modal.close();
       Tour.cancel();
       this.prompt();
@@ -1791,8 +1793,15 @@
     return `
       ${pageHeader('Guest list', 'Members &amp; access', 'Only people on this list can open the app. <b>Admins</b> host the event; <b>Atithis</b> (our guests) follow the schedule. Every change is recorded in the AuditLog.', 'members-overview')}
       <div class="grid grid-cols-3 gap-2 text-center mb-4">${stat(s.members.length, 'Members')}${stat(adminCount, 'Admins')}${stat(s.members.length - adminCount, 'Atithis')}</div>
-      <section class="card p-4 mb-4">
-        <h3 class="font-display text-xl text-kumkum-700">Group labels</h3>
+      <details data-group-manager ${s.groupManagerOpen || !s.groupCatalog.length ? 'open' : ''} class="group card mb-4 p-0">
+        <summary class="flex min-h-[56px] cursor-pointer list-none items-center justify-between gap-2 p-4">
+          <span class="font-display text-xl text-kumkum-700">Group labels</span>
+          <span class="flex shrink-0 items-center gap-2 text-xs font-semibold text-ink-500">
+            ${s.groupCatalog.length} added
+            <span class="transition-transform group-open:rotate-180" aria-hidden="true">▾</span>
+          </span>
+        </summary>
+        <div class="px-4 pb-4">
         <p class="mt-1 text-xs text-ink-500">Create labels for member access and ceremony audiences. Archiving keeps current assignments but prevents new ones.</p>
         <form data-action="add-group" class="mt-3 flex gap-2" novalidate>
           <input name="label" maxlength="30" required placeholder="e.g. Family" aria-label="New group label" class="input min-w-0" />
@@ -1804,18 +1813,23 @@
             ${group.status === 'Active' ? `<button type="button" data-action="archive-group" data-label="${escapeHtml(group.label)}" ${Store.isPending(`group:${group.label}`) ? 'disabled' : ''} ${pendingAttrs(`group:${group.label}`)} class="btn btn-ghost btn-sm min-h-[44px]">${spinnerOr(`group:${group.label}`, 'Archive')}</button>` : ''}
           </li>`).join('')}
         </ul>` : emptyState('🏷️', 'No group labels yet', 'Add a label to make it available in member and ceremony forms.')}
-      </section>
+        </div>
+      </details>
       ${formResponsesSection(s)}
-      <section data-section="member-invite" class="relative overflow-hidden rounded-3xl border-2 border-marigold-300 bg-gradient-to-br from-marigold-50 via-ivory-50 to-haldi-50 p-4 mb-4 shadow-card">
-        <div class="relative flex items-start gap-3">
+      <details data-section="member-invite" data-member-invite ${s.memberInviteOpen ? 'open' : ''} class="group relative mb-4 overflow-hidden rounded-3xl border-2 border-marigold-300 bg-gradient-to-br from-marigold-50 via-ivory-50 to-haldi-50 shadow-card">
+        <summary class="relative flex min-h-[64px] cursor-pointer list-none items-center justify-between gap-3 p-4">
+          <div class="flex items-start gap-3">
           <div class="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-marigold-100 text-xl" aria-hidden="true">✉️</div>
           <div>
             <p class="eyebrow">New access</p>
             <h3 class="font-display text-xl text-kumkum-700">Invite a member</h3>
-            <p class="mt-1 text-xs text-ink-600">Add their Google email, choose their role, and assign any guest groups.</p>
           </div>
-        </div>
-        <form data-action="add-member" class="relative mt-4 space-y-3 rounded-2xl border border-haldi-200 bg-ivory-50 p-3" novalidate>
+          </div>
+          <span class="transition-transform group-open:rotate-180" aria-hidden="true">▾</span>
+        </summary>
+        <div class="px-4 pb-4">
+        <p class="text-xs text-ink-600">Add their Google email, choose their role, and assign any guest groups.</p>
+        <form data-action="add-member" class="relative mt-3 space-y-3 rounded-2xl border border-haldi-200 bg-ivory-50 p-3" novalidate>
           <label class="block text-xs font-semibold text-ink-600" for="new-member-email">Google email</label>
           <input id="new-member-email" name="email" type="email" inputmode="email" autocomplete="off" required placeholder="guest@gmail.com" class="input" />
           <label class="block text-xs font-semibold text-ink-600">Access role
@@ -1828,7 +1842,8 @@
             ${spinnerOr('member:add', 'Add member')}
           </button>
         </form>
-      </section>
+        </div>
+      </details>
       <section data-section="member-search" class="card mb-4 border border-haldi-200 bg-gradient-to-br from-ivory-50 to-haldi-50 p-4">
         <div class="flex items-center justify-between gap-3">
           <div>
@@ -1884,7 +1899,7 @@
           </div>
         </article>`).join('')}</div>` : emptyState('🔔', all.length ? 'No matching announcements' : 'No announcements yet', emptyText)}
       ${s.isAdmin ? `<button type="button" data-action="open-composer" data-tour="announce-fab" aria-haspopup="dialog"
-        class="announce-fab fixed right-4 z-20 inline-flex min-h-[52px] items-center gap-2 rounded-full bg-kumkum-600 px-5 font-semibold text-ivory-50 shadow-lift ring-2 ring-haldi-300 hover:bg-kumkum-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-haldi-400">
+        class="announce-fab fixed right-4 z-20 inline-flex min-h-[48px] items-center gap-1.5 rounded-full bg-kumkum-600 px-4 text-sm font-semibold text-ivory-50 shadow-lift ring-2 ring-haldi-300 hover:bg-kumkum-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-haldi-400">
         <span aria-hidden="true">📣</span> Announce${hasDraft(s.broadcastDraft) ? '<span class="ml-1 rounded-full bg-haldi-300 px-2 py-0.5 text-[10px] text-ink-900">Draft</span>' : ''}
       </button>` : ''}`;
   };
@@ -2102,6 +2117,10 @@
     });
     const stayManager = $('[data-stay-manager]');
     if (stayManager) s.stayManagerOpen = stayManager.open;
+    const groupManager = $('[data-group-manager]');
+    if (groupManager) s.groupManagerOpen = groupManager.open;
+    const memberInvite = $('[data-member-invite]');
+    if (memberInvite) s.memberInviteOpen = memberInvite.open;
     $$('[data-event-control]').forEach((details) => {
       if (details.open) s.openEventControls.add(details.dataset.id);
       else s.openEventControls.delete(details.dataset.id);

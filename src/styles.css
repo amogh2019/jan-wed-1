@@ -55,7 +55,7 @@
 @layer utilities {
   .safe-top { padding-top: env(safe-area-inset-top); }
   .safe-bottom { padding-bottom: calc(env(safe-area-inset-bottom) + 0.25rem); }
-  .announce-fab { bottom: calc(env(safe-area-inset-bottom) + 5.25rem); }
+  .announce-fab { bottom: calc(env(safe-area-inset-bottom) + 5.5rem); }
   .no-scrollbar { scrollbar-width: none; }
   .no-scrollbar::-webkit-scrollbar { display: none; }
   .text-foil { background: linear-gradient(100deg, #a7741f, #f6e0a3 45%, #c9962b 60%, #f6e0a3); -webkit-background-clip: text; background-clip: text; color: transparent; }

@@ -1236,6 +1236,8 @@ async function assertTourStep(page, id, tab, target = null) {
       'completion retry records the first successful skip');
     await tourRetryPage.close();
 
+    await page.locator('[data-member-invite] summary').click();
+    assert(await page.locator('[data-member-invite]').getAttribute('open') !== null, 'member invite card expands on demand');
     await page.fill('#new-member-email', 'New.Guest@Gmail.com');
     await page.selectOption('form[data-action="add-member"] select[name="role"]', 'Atithi');
     await page.check('form[data-action="add-member"] input[name="groups"][value="Family"]');
