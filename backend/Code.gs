@@ -70,7 +70,8 @@ var OPTIONAL_HEADERS = {
   Members: ['TourStatus', 'TourCompletedAt', 'Groups', 'NotificationsClearedAt', 'Stay', 'Room', 'Name'],
   // Email links a travel row to the Atithi who sees it on "My travel"; DropStatus tracks the departure drop-off.
   // FormResponse: the Google Form response (its Timestamp) a row was created from, so a guest's repeat sign-ups are each onboarded once.
-  Logistics: ['Email', 'DropStatus', 'FormResponse'],
+  // FamilyEmails: extra emails (comma separated) that also see this row on "My travel"; filled from the form's family emails.
+  Logistics: ['Email', 'DropStatus', 'FormResponse', 'FamilyEmails'],
 };
 
 // Defaults written ONLY into blank cells of rows that have a key value.
@@ -275,7 +276,7 @@ function buildSession_(user, admin) {
 /** Only rows linked to this email, stripped of anything about other guests. */
 function travelFor_(logistics, email) {
   return logistics
-    .filter(function (g) { return g.email && g.email === email; })
+    .filter(function (g) { return email && (g.email === email || g.familyEmails.indexOf(email) >= 0); })
     .map(function (g) {
       return {
         id: g.id, name: g.name, members: g.members, contact: g.contact,
@@ -541,7 +542,7 @@ var ACTIONS_ = {
       travelId = nextId_(table, 'ID', DEFAULT_ID_PREFIX.Logistics);
       var t = entry.travel;
       appendRecord_(table, {
-        ID: travelId, Name: t.name, Members: t.members, Contact: t.contact, Email: entry.email, FormResponse: entry.key,
+        ID: travelId, Name: t.name, Members: t.members, Contact: t.contact, Email: entry.email, FamilyEmails: entry.family.join(', '), FormResponse: entry.key,
         ArrivalDateTime: t.arrival, DepartureDateTime: t.departure, Mode: t.mode,
         PickupStatus: 'Pending', DropStatus: 'Pending',
       });
@@ -1473,6 +1474,19 @@ function toEvent_(v, statusOverride) {
   };
 }
 
+/** Comma/semicolon/space separated emails → normalized, valid, de-duplicated list. */
+function parseEmailList_(v) {
+  var seen = {};
+  var out = [];
+  String(v == null ? '' : v).split(/[,;\s]+/).forEach(function (raw) {
+    var e = normalizeEmail_(raw);
+    if (!e || seen[e] || e.length > MAX_EMAIL_LEN || !EMAIL_RE.test(e)) return;
+    seen[e] = true;
+    out.push(e);
+  });
+  return out;
+}
+
 function readLogistics_() {
   return readTable_(SHEETS.LOGISTICS).rows
     .filter(function (r) { return String(r.values.ID || '').trim() !== ''; })
@@ -1486,6 +1500,7 @@ function readLogistics_() {
         members: v.Members === '' ? '' : String(v.Members),
         contact: String(v.Contact || '').trim(),
         email: normalizeEmail_(v.Email),
+        familyEmails: parseEmailList_(v.FamilyEmails),
         arrival: formatDateTime_(v.ArrivalDateTime),
         departure: formatDateTime_(v.DepartureDateTime),
         mode: String(v.Mode || '').trim(),

@@ -1614,7 +1614,7 @@
               <div class="min-w-0">
                 <h4 class="font-semibold text-ink-900 truncate">${escapeHtml(g.name)} ${guestCount(g)}</h4>
                 ${contactLink(g)}
-                ${g.email ? `<p class="text-[11px] text-ink-400 truncate">Linked to ${escapeHtml(g.email)}</p>` : ''}
+                ${g.email ? `<p class="text-[11px] text-ink-400 truncate">Linked to ${escapeHtml([g.email, ...(g.familyEmails || [])].join(', '))}</p>` : ''}
               </div>
               ${badge(g[mode.statusKey])}
             </div>

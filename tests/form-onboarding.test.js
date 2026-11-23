@@ -253,3 +253,31 @@ test('legacy rows match by email + name + dates, ignoring case and spacing', () 
   d[1][d[0].indexOf('Name')] = 'The Rao Family';
   assert.equal(b.call(ADMIN, 'listFormResponses').data.formResponses.items.length, 0);
 });
+
+test('family emails are stored on the travel row and see it in their own session', () => {
+  const b = backend([row({ family: 'a@example.com, B@example.com' })]);
+  const out = b.call(ADMIN, 'onboardFormResponse', { row: 2, email: 'new@example.com' });
+  const g = out.data.logistics.find((l) => l.email === 'new@example.com');
+  assert.deepEqual([...g.familyEmails], ['a@example.com', 'b@example.com']);
+  assert.equal(lastLogistics(b).name, 'The Rao Family');
+
+  b.sheets.Members.data.forEach((r) => { if (r[0] === 'a@example.com') r[1] = 'Atithi'; });
+  for (const who of ['a@example.com', 'b@example.com', 'new@example.com']) {
+    const mine = b.call(who, 'session').data.myTravel;
+    assert.equal(mine.length, 1, who);
+    assert.equal(mine[0].name, 'The Rao Family');
+    assert.equal(mine[0].familyEmails, undefined, 'other emails are not exposed to guests');
+  }
+  assert.equal(b.call(ATITHI, 'session').data.myTravel.length, 0);
+});
+
+test('hand-typed family emails in the sheet grant access; junk entries are ignored', () => {
+  const b = backend([row({ family: '' })]);
+  b.call(ADMIN, 'onboardFormResponse', { row: 2, email: 'new@example.com' });
+  const d = b.sheets.Logistics.data;
+  d[d.length - 1][d[0].indexOf('FamilyEmails')] = 'Cousin@Example.com; nonsense  ,x@example.com';
+  const g = b.call(ADMIN, 'session').data.logistics.find((l) => l.email === 'new@example.com');
+  assert.deepEqual([...g.familyEmails], ['cousin@example.com', 'x@example.com']);
+  b.call(ADMIN, 'addMember', { email: 'cousin@example.com', role: 'Atithi' });
+  assert.equal(b.call('cousin@example.com', 'session').data.myTravel.length, 1);
+});
