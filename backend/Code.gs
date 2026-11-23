@@ -69,7 +69,8 @@ var OPTIONAL_HEADERS = {
   // Name: the member's Google display name, saved once on their first sign-in and never overwritten.
   Members: ['TourStatus', 'TourCompletedAt', 'Groups', 'NotificationsClearedAt', 'Stay', 'Room', 'Name'],
   // Email links a travel row to the Atithi who sees it on "My travel"; DropStatus tracks the departure drop-off.
-  Logistics: ['Email', 'DropStatus'],
+  // FormResponse: the Google Form response (its Timestamp) a row was created from, so a guest's repeat sign-ups are each onboarded once.
+  Logistics: ['Email', 'DropStatus', 'FormResponse'],
 };
 
 // Defaults written ONLY into blank cells of rows that have a key value.
@@ -534,14 +535,13 @@ var ACTIONS_ = {
     });
 
     var travelId = '';
-    var hasTravel = readLogistics_().some(function (g) { return g.email === entry.email; });
-    if (!hasTravel) {
+    if (!travelRecorded_(buildTravelIndex_(), entry)) {
       ensureColumns_(SHEETS.LOGISTICS, OPTIONAL_HEADERS.Logistics);
       var table = readTable_(SHEETS.LOGISTICS);
       travelId = nextId_(table, 'ID', DEFAULT_ID_PREFIX.Logistics);
       var t = entry.travel;
       appendRecord_(table, {
-        ID: travelId, Name: t.name, Members: t.members, Contact: t.contact, Email: entry.email,
+        ID: travelId, Name: t.name, Members: t.members, Contact: t.contact, Email: entry.email, FormResponse: entry.key,
         ArrivalDateTime: t.arrival, DepartureDateTime: t.departure, Mode: t.mode,
         PickupStatus: 'Pending', DropStatus: 'Pending',
       });
@@ -847,11 +847,12 @@ function openFormSheet_() {
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
   if (!sheet) return null;
   var values = sheet.getDataRange().getValues();
-  var cols = { email: -1, family: -1, name: -1, members: -1, contact: -1, arrival: -1, departure: -1, mode: -1 };
+  var cols = { ts: -1, email: -1, family: -1, name: -1, members: -1, contact: -1, arrival: -1, departure: -1, mode: -1 };
   (values[0] || []).forEach(function (h, i) {
     var k = String(h == null ? '' : h).toLowerCase().replace(/[^a-z0-9]/g, '');
     var key = null;
-    if (k === 'emailaddress') key = 'email';
+    if (k === 'timestamp') key = 'ts';
+    else if (k === 'emailaddress') key = 'email';
     else if (k.indexOf('familymember') === 0) key = 'family';
     else if (k.indexOf('nameof') === 0) key = 'name';
     else if (k.indexOf('numberofmembers') === 0) key = 'members';
@@ -893,7 +894,7 @@ function buildFormEntry_(form, index) {
   var email = normalizeEmail_(cell('email'));
   var typedName = String(cell('name') == null ? '' : cell('name')).trim();
   if (!email && !typedName) return null;
-  var entry = { row: index + 1, email: email, valid: email.length <= MAX_EMAIL_LEN && EMAIL_RE.test(email), family: [], warnings: [] };
+  var entry = { row: index + 1, key: formatDateTime_(cell('ts')), email: email, valid: email.length <= MAX_EMAIL_LEN && EMAIL_RE.test(email), family: [], warnings: [] };
   if (!entry.valid) return entry;
 
   var seen = {};
@@ -929,6 +930,34 @@ function buildFormEntry_(form, index) {
   return entry;
 }
 
+/** Travel rows already in Logistics, keyed for matching against form responses. */
+function buildTravelIndex_() {
+  var index = { byKey: {}, byContent: {} };
+  readTable_(SHEETS.LOGISTICS).rows.forEach(function (r) {
+    var v = r.values;
+    if (String(v.ID || '').trim() === '') return;
+    var email = normalizeEmail_(v.Email);
+    if (!email) return;
+    var key = formatDateTime_(v.FormResponse);
+    if (key) index.byKey[email + '|' + key] = true;
+    index.byContent[travelContentKey_(email, v.Name, v.ArrivalDateTime, v.DepartureDateTime)] = true;
+  });
+  return index;
+}
+
+/** Email + family name + arrival + departure; one email may sign up several families. Name compare ignores case, spacing and the formula-guard apostrophe. */
+function travelContentKey_(email, name, arrival, departure) {
+  var n = String(name == null ? '' : name).replace(/^'(?=[=+\-@\t\r])/, '').trim().replace(/\s+/g, ' ').toLowerCase();
+  return [email, n, formatDateTime_(arrival), formatDateTime_(departure)].join('|');
+}
+
+/** True when this response's travel plan already exists: same response, or same email, family name, arrival and departure. */
+function travelRecorded_(index, entry) {
+  if (entry.key && index.byKey[entry.email + '|' + entry.key]) return true;
+  var t = entry.travel;
+  return !!index.byContent[travelContentKey_(entry.email, t.name, t.arrival, t.departure)];
+}
+
 /** Newest-first sign-ups that still have someone to onboard, plus counts of what was hidden. */
 function listFormResponses_() {
   var form = openFormSheet_();
@@ -936,8 +965,7 @@ function listFormResponses_() {
   if (!form) return out;
   var members = {};
   readMembers_().forEach(function (m) { members[m.email] = true; });
-  var travel = {};
-  readLogistics_().forEach(function (g) { if (g.email) travel[g.email] = true; });
+  var travel = buildTravelIndex_();
 
   var stop = Math.max(1, form.values.length - FORM_MAX_ROWS);
   for (var i = form.values.length - 1; i >= stop; i--) {
@@ -945,12 +973,13 @@ function listFormResponses_() {
     if (!entry) continue;
     if (!entry.valid) { out.hidden.noEmail += 1; continue; }
     var newCount = [entry.email].concat(entry.family).filter(function (e) { return !members[e]; }).length;
-    if (!newCount) { out.hidden.onboarded += 1; continue; }
+    var hasTravel = travelRecorded_(travel, entry);
+    if (!newCount && hasTravel) { out.hidden.onboarded += 1; continue; }
     out.items.push({
       row: entry.row, email: entry.email, name: entry.travel.name, members: String(entry.travel.members),
       contact: entry.travel.contact, mode: entry.travel.mode,
       arrival: formatDateTime_(entry.travel.arrival), departure: formatDateTime_(entry.travel.departure),
-      primaryIsMember: !!members[entry.email], hasTravel: !!travel[entry.email], newCount: newCount,
+      primaryIsMember: !!members[entry.email], hasTravel: hasTravel, newCount: newCount,
       familyEmails: entry.family.map(function (e) { return { email: e, isMember: !!members[e] }; }),
       warnings: entry.warnings,
     });

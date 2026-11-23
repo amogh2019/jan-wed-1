@@ -1717,7 +1717,7 @@
             <p class="text-xs text-ink-400">${[i.mode, i.arrival && `Arrives ${formatDateTime(i.arrival)}`, i.departure && `Leaves ${formatDateTime(i.departure)}`].filter(Boolean).map(escapeHtml).join(' · ')}</p>
             ${i.warnings.map((w) => `<p class="mt-1 text-[11px] text-kumkum-700">⚠ ${escapeHtml(w)}</p>`).join('')}
             <div class="mt-2"><p class="text-xs font-medium text-ink-700">Add to groups</p>${groupPicker(s.groupCatalog, formGroups(s, i.row), 'form-groups', { id: String(i.row) }, busy)}</div>
-            <button type="button" data-action="onboard-form" data-row="${i.row}" data-email="${escapeHtml(i.email)}" ${busy ? 'disabled' : ''} ${pendingAttrs(`form:${i.row}`)} class="btn btn-primary btn-sm mt-2 min-h-[44px]">${spinnerOr(`form:${i.row}`, `Onboard ${i.newCount} ${i.newCount === 1 ? 'person' : 'people'}`)}</button>
+            <button type="button" data-action="onboard-form" data-row="${i.row}" data-email="${escapeHtml(i.email)}" ${busy ? 'disabled' : ''} ${pendingAttrs(`form:${i.row}`)} class="btn btn-primary btn-sm mt-2 min-h-[44px]">${spinnerOr(`form:${i.row}`, i.newCount ? `Onboard ${i.newCount} ${i.newCount === 1 ? 'person' : 'people'}` : 'Add travel plan')}</button>
           </li>`;
         }).join('')}
       </ul>` : `${note}${emptyState('🎉', 'Everyone has been onboarded', 'New form responses will show up here.')}`;
@@ -2446,7 +2446,10 @@
       const who = entry.newCount === 1 ? '1 person' : `${entry.newCount} people`;
       const groups = Store.state.formGroupsDrafts[row] ?? activeGroupLabels(Store.state.groupCatalog);
       const groupNote = groups.length ? `, in ${groups.join(', ')}` : ', with no groups';
-      if (!window.confirm(`Onboard ${entry.name || entry.email}? This adds ${who} as Atithi${groupNote}${entry.hasTravel ? '' : ' and creates their travel plan'}.`)) return;
+      const prompt = entry.newCount
+        ? `Onboard ${entry.name || entry.email}? This adds ${who} as Atithi${groupNote}${entry.hasTravel ? '' : ' and creates their travel plan'}.`
+        : `Add a travel plan for ${entry.name || entry.email}? Everyone on this response is already onboarded.`;
+      if (!window.confirm(prompt)) return;
       const data = await this.run(`form:${row}`, () => Api.post('onboardFormResponse', { row, email, groups }));
       if (!data) return;
       const drafts = { ...Store.state.formGroupsDrafts };

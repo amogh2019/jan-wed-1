@@ -27,12 +27,13 @@ const backend = (rows, extra = {}) => createBackend({
   ...extra,
 });
 
-test('list parses entries newest first and hides fully onboarded ones', () => {
+test('list parses entries newest first; a member with no travel plan yet still shows, with nothing new to onboard', () => {
   const b = backend([row({ email: 'old@example.com', family: '' }), row({ email: ATITHI, family: '' }), row({ email: 'bad', family: '' }), row()]);
   const { formResponses: f } = b.call(ADMIN, 'listFormResponses').data;
   assert.equal(f.configured, true);
-  assert.deepEqual(f.hidden, { onboarded: 1, noEmail: 1 });
-  assert.deepEqual(f.items.map((i) => i.email), ['new@example.com', 'old@example.com']);
+  assert.deepEqual(f.hidden, { onboarded: 0, noEmail: 1 });
+  assert.deepEqual(f.items.map((i) => i.email), ['new@example.com', ATITHI, 'old@example.com']);
+  assert.equal(f.items[1].newCount, 0);
   const item = f.items[0];
   assert.equal(item.row, 5);
   assert.equal(item.newCount, 3);
@@ -186,4 +187,69 @@ test('admin-chosen groups override the default; empty means no groups; unknown o
   assert.ok((() => { const r = run([]); return r.data.members.filter((m) => r.data.result.added.includes(m.email)).every((m) => m.groups.length === 0); })());
   assert.equal(run(['Nope']).code, 'BAD_REQUEST');
   assert.equal(run(['Old Crew']).code, 'BAD_REQUEST');
+});
+
+test('repeat responses from an onboarded email still get their own travel plan, once each', () => {
+  const b = backend([
+    row({ ts: '01/01/2027 10:00:00', email: ATITHI, family: '' }),
+    row({ ts: '02/01/2027 10:00:00', email: ATITHI, family: '', arrival: '21/01/2027 08:00', departure: '24/01/2027 12:00' }),
+  ]);
+  let f = b.call(ADMIN, 'listFormResponses').data.formResponses;
+  assert.deepEqual(f.items.map((i) => [i.row, i.newCount, i.hasTravel]), [[3, 0, false], [2, 0, false]]);
+
+  const first = b.call(ADMIN, 'onboardFormResponse', { row: 2, email: ATITHI });
+  assert.ok(first.data.result.travelId);
+  f = first.data.formResponses;
+  assert.deepEqual(f.items.map((i) => i.row), [3]);
+
+  const second = b.call(ADMIN, 'onboardFormResponse', { row: 3, email: ATITHI });
+  assert.ok(second.data.result.travelId);
+  assert.equal(second.data.logistics.filter((l) => l.email === ATITHI).length, 2);
+  assert.equal(second.data.formResponses.items.length, 0);
+  assert.equal(second.data.formResponses.hidden.onboarded, 2);
+
+  const again = b.call(ADMIN, 'onboardFormResponse', { row: 3, email: ATITHI });
+  assert.equal(again.data.result.travelId, '');
+  assert.equal(again.data.logistics.filter((l) => l.email === ATITHI).length, 2);
+});
+
+test('an identical duplicate submission does not create a second travel plan', () => {
+  const b = backend([
+    row({ ts: '01/01/2027 10:00:00', family: '' }),
+    row({ ts: '01/01/2027 10:05:00', family: '' }),
+  ]);
+  b.call(ADMIN, 'onboardFormResponse', { row: 2, email: 'new@example.com' });
+  const f = b.call(ADMIN, 'listFormResponses').data.formResponses;
+  assert.equal(f.items.length, 0);
+  assert.equal(f.hidden.onboarded, 2);
+});
+
+test('legacy travel rows without a FormResponse key still match their form response', () => {
+  const b = backend([row({ email: ATITHI, family: '' })]);
+  b.call(ADMIN, 'onboardFormResponse', { row: 2, email: ATITHI });
+  const d = b.sheets.Logistics.data;
+  d[1][d[0].indexOf('FormResponse')] = '';
+  assert.equal(b.call(ADMIN, 'listFormResponses').data.formResponses.items.length, 0);
+});
+
+test('same email, same dates but a different family name is a separate sign-up', () => {
+  const b = backend([
+    row({ ts: '01/01/2027 10:00:00', family: '', name: 'The Rao Family' }),
+    row({ ts: '01/01/2027 10:05:00', family: '', name: 'The Iyer Family' }),
+  ]);
+  b.call(ADMIN, 'onboardFormResponse', { row: 2, email: 'new@example.com' });
+  let f = b.call(ADMIN, 'listFormResponses').data.formResponses;
+  assert.deepEqual(f.items.map((i) => i.name), ['The Iyer Family']);
+  const out = b.call(ADMIN, 'onboardFormResponse', { row: 3, email: 'new@example.com' });
+  assert.ok(out.data.result.travelId);
+  assert.deepEqual(out.data.logistics.filter((l) => l.email === 'new@example.com').map((l) => l.name).sort(), ['The Iyer Family', 'The Rao Family']);
+});
+
+test('legacy rows match by email + name + dates, ignoring case and spacing', () => {
+  const b = backend([row({ email: ATITHI, family: '', name: ' the  rao family ' })]);
+  b.call(ADMIN, 'onboardFormResponse', { row: 2, email: ATITHI });
+  const d = b.sheets.Logistics.data;
+  d[1][d[0].indexOf('FormResponse')] = '';
+  d[1][d[0].indexOf('Name')] = 'The Rao Family';
+  assert.equal(b.call(ADMIN, 'listFormResponses').data.formResponses.items.length, 0);
 });
